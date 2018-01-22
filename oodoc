@@ -1,0 +1,815 @@
+#!/usr/bin/perl -w
+#++
+# % oodoc(1)	Infinity utilities
+#
+# # NAME
+#
+# oodoc - Extract embeded documentation from source
+#
+#--
+#
+#   Copyright (C) 2018 Alejandro Liu Ly
+#
+#   This is free software; you can redistribute it and/or modify
+#   it under the terms of the GNU General Public License as
+#   published by the Free Software Foundation; either version 2 of 
+#   the License, or (at your option) any later version.
+#
+#   This software is distributed in the hope that it will be useful,
+#   but WITHOUT ANY WARRANTY; without even the implied warranty of
+#   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#   GNU General Public License for more details.
+#
+#   You should have received a copy of the GNU General Public
+#   License along with this program.  If not, see 
+#   <http://www.gnu.org/licenses/>
+#
+use strict;
+use warnings;
+
+use File::Basename;
+use File::Temp qw(tempfile tempdir);
+use YAML;
+
+BEGIN {
+  my $c = 0;
+  foreach my $f (qw(INCLUDE EXCLUDE INCLUDE_CODE)) {
+    eval "sub ${f}() { $c; }";
+    ++$c;
+  }
+}
+
+my @sect_titles = ('','User commands','System calls','Library functions',
+		   'Special files','File formats','Games','Miscellaneous',
+		   'System administration','Linux kernel');
+
+sub extract_docstrings($;$$$) {
+  my ($fh,$start,$end,$invert) = @_;
+
+  my @res = ();		# Returned content
+  my $prefix_re;	# Searching prefix
+  my $mode;		# Current search mode
+  
+  if ($start) {
+    $start = quotemeta($start);
+    $end = quotemeta($end);
+    $mode = EXCLUDE;
+  } else {
+    $prefix_re = '\s*'.quotemeta($end);
+    $end = '';
+    $mode = INCLUDE;
+  }
+
+  while (<$fh>) {
+    s/\r?\n$//; # Remove EOL
+    if ($mode == EXCLUDE) {
+      # Searching for beginning of embedded document
+      if (/^(.*)$start$/) {
+	# OK, found the beginning string...
+	$prefix_re = $1;
+	if ($prefix_re =~ /^\s*$/) {
+	  # Only white space...
+	  my $l = length($prefix_re);
+	  my $ch = substr($_,$l,1);
+	  my $tx = $ch;
+	  while (substr($_,++$l,1) eq $ch) {
+	    $tx .= $ch;
+	  }
+	  $prefix_re = '\s*'.$tx;
+	} else {
+	  # OK, there is non-white space before the special sequence
+	  # so we convert the text before the special sequence as the
+	  # comment marker...
+	  $prefix_re =~ s/^\s+//;
+	  $prefix_re =~ s/\s+$//;
+	  $prefix_re = '\s*'.quotemeta($prefix_re);
+	}
+	push @res,'' if ($invert);
+	$mode = INCLUDE;
+	next;
+      }
+      push @res,$_ if ($invert);
+    } elsif ($mode == INCLUDE || $mode == INCLUDE_CODE) {
+      if ($end && /^\s*$end$/) {
+	push @res,'' if ($invert);
+	$mode = EXCLUDE;
+	next;
+      }
+      my $ln = $_;
+      if (s/^$prefix_re//) {
+	if ((s/^\s*$//) || (s/^ //) || (/^\t/)) {
+	  push @res, ($invert ? '' : $_);
+	  if (/^\s*```/) {
+	    $mode = ($mode == INCLUDE_CODE) ? INCLUDE : INCLUDE_CODE;
+	  }
+	  next;
+	}
+      }
+      push @res, $ln if ($invert || $mode == INCLUDE_CODE);
+    }
+  }
+  return @res;
+}
+
+sub get_meta_data(\@) {
+  my ($res) = @_;
+
+  my $i;
+  for ($i = 0; $i < scalar(@$res) ; ++$i) {
+    last unless ($res->[$i] =~ /^\s*$/);
+  }
+  if ($i < scalar(@$res)) {
+    if ($res->[$i] =~ /^\s*%/) {
+      # Found a title block
+      my $start = $i;
+      while (++$i < scalar(@$res) && $i - $start < 3) {
+	last unless ($res->[$i] =~ /^\s*%/);
+      }
+      return parse_title_block($res,$start,$i);
+    }
+    my $prev = '';
+    my %yaml = ();
+    
+    for (;$i < scalar(@$res) ; ++$i ) {
+      if ($res->[$i] =~ /^\s*---\s*$/ && $prev =~ /^\s*$/) {
+	# Potential start of YAML block...
+	my $start = $i;
+	while (++$i < scalar(@$res)) {
+	  if ($res->[$i] =~ /^\s*---\s*$/ || $res->[$i] =~ /^\s*...\s*$/) {
+	    # Found the ending of YAML block
+	    my $yin = parse_yaml_block($res,$start,$i);
+	    last unless ($yin);
+
+	    my %loop = (':offset' => $start, ':length' => $i-$start);
+	    while (my ($k,$v) = each %loop) {
+	      if (exists $yaml{$k}) {
+		if (ref($yaml{$k})) {
+		  push @{$yaml{$k}}, $v;
+		} else {
+		  $yaml{$k} = [ $yaml{$k}, $v];
+		}
+	      } else {
+		$yaml{$k} = $v;
+	      }
+	    }
+	    %yaml = ( %yaml, %$yin);
+	    last;
+	  }
+	}
+      }
+      $prev = $res->[$i];
+    }
+    return \%yaml if (scalar(%yaml));
+  }
+  
+  # 
+  # Nothing Found!
+  #
+  return undef;
+}
+
+sub parse_title_block(\@$$) {
+  my ($res,$start,$end) = @_;
+  my %attrs = ();
+  $attrs{':offset'} = $start;
+  $attrs{':length'} = $end - $start;
+  my $title = $res->[$start];
+  $title =~ s/^\s*%\s*//;
+  my ($a,$b) = split(/\s+/,$title,2);
+  if ($a =~ /\((\d+)\)$/) {
+    # This is a man page...
+    $attrs{'title'} = $a;
+    my $snum = int($1);
+    if ($b) {
+      my ($a,$c) = split(/\s*\|\s*/,$b,2);
+      $attrs{'section'} = $a ? $a : $sect_titles[$snum];
+      if ($c) {
+	$attrs{'version'} = $c;
+	$attrs{'version'} =~ s/^\s*Version\s*//;
+      }
+    }
+  } else {
+    $attrs{'title'} = $title;
+  }
+  $attrs{'author'} = $start+1 < $end ? $res->[$start+1] : '';
+  $attrs{'date'} = $start+2 < $end ? $res->[$start+2] : '';
+  foreach my $k (keys %attrs) {
+    $attrs{$k} =~ s/^\s*%\s*//;
+  }
+  return \%attrs;
+}
+
+sub parse_yaml_block(\@$$) {
+  my ($res,$start,$end) = @_;
+  #print '$res:   ',scalar(@$res),"\n";
+  #print '$start: ',$start,"\n";
+  #print '$end:   ',$end,"\n";
+  #print join("\n",@$res[$start .. $end]),"\n";
+  my ($l) = Load(join("\n",@$res[$start .. $end])."\n");
+  return $l;
+}
+
+sub rm_meta_data(\@\%) {
+  my ($res,$attrs) = @_;
+
+  return '' unless ((exists $attrs->{':offset'}) && (exists $attrs->{':length'}));
+  if (!ref($attrs->{':offset'})) {
+    # The simple case...
+    splice @$res,$attrs->{':offset'},$attrs->{':length'};
+  } else {
+    my $i = scalar(@{$attrs->{':offset'}});
+    while ($i--) {
+      splice @$res,$attrs->{':offset'}->[$i],$attrs->{':length'}->[$i];
+    }
+  }
+  delete $attrs->{':offset'};
+  delete $attrs->{':length'};
+  return 1;
+}
+
+sub add_meta_data(\%$) {
+  my ($meta,$fn) = @_;
+
+  unless ($meta->{'title'}) {
+    my ($a,$b,$c) = fileparse($fn,qr/\.[^.]*$/);
+    $meta->{'title'} = uc($a).'(1)';
+  }
+  unless ($meta->{'author'}) {
+    # First we try to do it via git
+    my $t = `git log -1 --format='%aN' "$fn" 2>/dev/null`;
+    if ($t) {
+      chomp($t);
+      $meta->{'author'} = $t;
+    } else {
+      # Otherwise, try through filesystem...
+      my ($uid) = (stat($fn))[4];
+      $meta->{'author'} = getpwuid($uid);
+    }
+  }
+  unless ($meta->{'date'}) {
+    # First we try to do it via git
+    my $t = `git log -1 --date=short --format='%ad' "$fn" 2>/dev/null`;
+    if ($t) {
+      chomp($t);
+      $meta->{'date'} = $t;
+    } else {
+      # Otherwise, try through filesystem...
+      my ($mtime) = (stat($fn))[9];
+      my ($mday,$mon,$year) = (localtime($mtime))[3..6];
+      $meta->{'date'} = sprintf('%04d-%02d-%02d',$year+1900,$mon+1,$mday);
+    }
+  }
+  unless ($meta->{'revision'}) {
+    # First try to do it via tags...
+    my $t = `git describe --dirty=-EXP 2>/dev/null`;
+    if ($t) {
+      chomp($t);
+      $meta->{'revision'} = $t;
+    } else {
+      my $b = `git log -1 --format='%h' "$fn" 2>/dev/null`;
+      if ($b) {
+	chomp($b);
+	$meta->{'revision'} = $b;
+      }
+    }
+  }
+}
+
+sub title_block(\%) {
+  my ($meta) = @_;
+  my $txt = '';
+  
+  $txt .= '% '.$meta->{'title'};
+  if ((scalar(split(/\s+/,$meta->{'title'})) == 1) && ($meta->{'title'} =~ /\(\d+\)$/)) {
+    # This is a man page title block
+    $txt .= ' '.$meta->{'section'} if ($meta->{'section'});
+    if ($meta->{'version'}) {
+      $txt .= ' | Version '.$meta->{'version'};
+    } elsif ($meta->{'revision'}) {
+      $txt .= ' | Revision '.$meta->{'revision'};
+    }
+  }
+  $txt .= "\n";
+  foreach my $attr (qw(author date)) {
+    $txt .= '% '.($meta->{$attr} ? $meta->{$attr} : '')."\n";
+  }
+  $txt .= "\n";
+  return $txt;
+}
+
+sub yaml_block(\%) {
+  my ($meta) = @_;
+  return Dump($meta)."...\n\n";
+}
+
+if (scalar(@ARGV) == 0) {
+  #++
+  #
+  # # SYNOPSIS
+  #
+  # **oodoc** **subcmd** _[opts]_
+  #
+  print STDERR "Usage:\n\t$0 SUBCMD [opts]\n";
+  exit(1);
+  #
+  # # DESCRIPTION
+  #
+  # **oodoc** read source and/or script files and converts specially
+  # embedded comments into documentation files.
+  #
+  #--
+}
+  
+my $op = shift(@ARGV);
+
+#++
+#
+# ## SUBCOMMANDS
+#
+if ($op eq 'man') {
+  #
+  # - **man** _[options]_ **[input_file]**
+  # : Display `UNIX` style man page from the specified source file.
+  #
+  foreach my $f (@ARGV) {
+    open(my $fh,'<',$f) || die "$f: $!\n";
+    my @out = extract_docstrings($fh,'#++','#--');
+    close($fh);
+    my $meta = get_meta_data(@out);
+    if ($meta) {
+      rm_meta_data(@out,%$meta);
+    } else {
+      $meta = {};
+    }
+    add_meta_data(%$meta,$f);
+    
+
+    open(my $of,'| pandoc -s -t man | man -l -') || die "$!\n";
+    print $of title_block(%$meta);
+    print $of join("\n",@out),"\n";
+    close($of);
+    
+    #print man_title_block(%$meta);
+    #use Data::Dumper;
+    #print Dumper($meta);
+    #print "====",$f,"\n" if (scalar(@ARGV) > 1);
+    #print join("\n",@out),"\n==\n";
+  }
+} elsif ($op eq 't') {
+  foreach my $f (@ARGV) {
+    open(my $fh,'<',$f) || die "$f: $!\n";
+    my @out = extract_docstrings($fh,'#++','#--');
+    close($fh);
+    my $meta = get_meta_data(@out);
+    if ($meta) {
+      rm_meta_data(@out,%$meta);
+    } else {
+      $meta = {};
+    }
+    add_meta_data(%$meta,$f);
+    
+    print yaml_block(%$meta);
+  }
+} else {
+  die "Unknown subcmd: $op\n";
+}
+#--
+
+#++
+#
+# # MAN PAGES
+#
+# *oodoc* can generate `UNIX` style manual pages from embedded
+# comments.  Text in these comments can be formatted using *Markdown*.
+#
+# **oodoc** can be integrated with *make(1)* scripts or called
+# directly to read documentation from files.
+#
+# Embedded documentation is extracted from blocks
+# delimited by:
+#
+#     #++
+#     # Documentation
+#     #--
+#
+# ## LAYOUT
+#
+# The basic layout of a man page should look like this:
+#
+#     #++
+#     # % cmd(1)
+#     #
+#     # # NAME
+#     #
+#     # cmd - one line description
+#     #
+#     # # SYNOPSIS
+#     #
+#     # *cmd* ['options'] 'args'
+#     #
+#     # # DESCRIPTION
+#     #
+#     # A textual description of the functioning of the command.
+#     #
+#     # # SEE ALSO
+#     #
+#     # List of related commands or functions (comma separated).
+#     #--
+#
+# `NAME` and `SYNOPSIS` are mandatory.
+#
+# `NAME` should contain the name of the
+# command or function, followed by a one-line description of what it does.
+#
+# `SYNOPSIS`, in the case of a command, a formal description of how to run
+# it and what command line options it takes. For program
+# functions, a list of the parameters the function takes and
+# which header file contains its definition.
+#
+# Other sections may be present, but these are not well standardized
+# across man pages. Common examples include:
+#
+# `OPTIONS`, `EXIT STATUS`, `ENVIRONMENT`, `BUGS`, `FILES`, `AUTHOR`, `REPORTING`,
+# `EXAMPLES`, `BUGS`, `HISTORY` and `COPYRIGHT`.
+#
+# ## Title block
+#
+# The beginning of the man page contains a title block.  It is
+# defined by [pandoc](https://pandoc.org/MANUAL.html#metadata-blocks)
+# and it contains:
+#
+#     % cmdname(n) section title | version or revision
+#     % author
+#     % date
+#
+# If author or date are not needed they can be left blank.  Example:
+#
+#     % oodoc(1) infinity tools | Version 1.0
+#     % A Liu Ly
+#     % 2018-01-01
+#
+# ## Sections
+#
+# Common manual sections:
+#
+# * 1::	General commands
+# * 2::	System calls
+# * 3::	Library functions, covering in particular the C standard library
+# * 4::	Special files (usually devices, those found in /dev) and drivers
+# * 5::	File formats and conventions
+# * 6::	Games and screensavers
+# * 7::	Miscellanea
+# * 8::	System administration commands and daemons
+#
+# # REFERENCES
+#
+# * Man page conventions: http://linux.die.net/man/7/man-pages
+#
+#--
+
+__END__
+
+Todo
+
+https://pandoc.org/MANUAL.html#metadata-blocks
+http://jeromebelleman.gitlab.io/posts/publishing/manpages/
+
+CMS
+- https://github.com/jumbojett/OpenID-Connect-PHP
+- https://getgrav.org/downloads
+- http://picocms.org/download/
+
+1. Size
+2. Markdown
+3. Flat File
+4. Plugins & Themes
+5. User access with KeyCloak
+
+
+- MVP
+  - viewer for man pages
+  - extract to flat-file CMS
+
+Modes
+
+- strip : remove all docstrings...
+- man : create man pages
+  - viewer
+  - generate man pages for pkgs
+- help : in-line help
+  - for scripts
+  - for compiled files
+- multi-file documetation for flat-file CMS
+  - pico (smaller footprint)
+    - ++generate of diagrams using asciiart to png/svg
+    - ++authentication against keycloak
+      - openid connect
+      - auth_mellon
+  - grav
+- doxygen?
+
+
+
+__END__
+
+ 
+    close($fh);
+    if (scalar(%macros)) {
+	my $regex = join '|', map quotemeta, keys %macros;
+	$txt =~ s/($regex)/$macros{$1}/g;
+	foreach my $k (keys %attrs) {
+	    $attrs{$k} =~ s/($regex)/$macros{$1}/g;
+	}
+    }
+    return ($txt,\%attrs);
+}
+
+
+
+
+
+
+
+
+
+
+use Cwd qw(getcwd abs_path);
+use File::Find;
+
+
+# # MODES
+#
+# ```
+sub my code($$) {
+  return 5;
+}
+# ```
+# *--ext*::
+#    Extract man page.  This is the default.
+# *--view*::
+#    Preview man page.
+# *--asciidoc*::
+#    Extract *AsciiDoc* document.
+# *--genman*::
+#    Scan source directory and generate man pages.
+# *--query*::
+#    Query source and return manpage and section.
+#
+# # OPTIONS
+#
+# *--re=* re::
+#    Specified the regular expression to use for searching for comments
+# *--gzip=* yes|no::
+#    When in *genman* mode to `man` directory, files will be compressed.
+# *--outdir=* dir::
+#    manpages will be created in the *dir*.  If not specified it will
+#    default to the current directory.  If in *genman* mode, manpages
+#    will be created in the appropriate section directory.
+# *-D* _var=value_::
+#    Add a macro substitution value.
+#
+#
+# # HISTORY
+#
+# This was based on an old script named *srctoman* by W.Z. Venema,
+# from 1986.  Later was implemented as a *tclsh* script in 2007
+# that implemented its own (very limited) wiki markup.
+#
+# # SEE ALSO
+#
+#    a2x(1), man(1)
+#
+#--
+my $re = "^\\s*([*#]|\\/\\/)\\s?";
+my %macros = ();
+sub process_file {
+    my ($file,$re) = @_;
+
+    open(my $fh,'<',$file) || die "$file: $!\n";
+    #
+    # Search for beginning of man data
+    #
+    while (<$fh>) {
+	last if (/$re\+\+/);
+    }
+    die "$file: no embedded documentation\n" if (eof($fh));
+
+    my $txt = '';
+    my %attrs = ();
+
+    while (<$fh>) {
+	last if (/$re--/);
+	s/\s+$//;
+	if (s/$re//) {
+	    $txt .= $_."\n";
+	    if (/^\s*=\s+/ && /\((\d+)\)$/) {
+		my $sect = int($1);
+		my $mtime = (stat($file))[9];
+		my @lt = localtime($mtime);
+		$txt .= ":doctype:\tmanpage\n";
+		$txt .= sprintf(":Date:\t%04d-%02d-%02d\n",
+				$lt[5]+1900,$lt[4]+1,$lt[3]);
+		if ($sect_titles[$sect]) {
+		    $txt .= ":man manual:\t".$sect_titles[$sect]."\n";
+		}
+		$txt .= ":man source:\t".basename($file)."\n";
+		$attrs{sect} = $sect;
+		s/^\s*=\s+//;
+		s/\(\d+\)$//;
+		s/\s+$//;
+		s/^\s+//;
+		tr/A-Z/a-z/;
+		$attrs{name} = $_;
+
+	    }
+	}
+    }
+    close($fh);
+    if (scalar(%macros)) {
+	my $regex = join '|', map quotemeta, keys %macros;
+	$txt =~ s/($regex)/$macros{$1}/g;
+	foreach my $k (keys %attrs) {
+	    $attrs{$k} =~ s/($regex)/$macros{$1}/g;
+	}
+    }
+    return ($txt,\%attrs);
+}
+
+sub read_file {
+    my ($fn) = @_;
+    local $/=undef;
+    open(my $file,'<',$fn) || die("$fn: $!\n");
+    my $x = <$file>;
+    close $file;
+    return $x;
+}
+
+sub do_extract {
+    my ($file,$dir,$re) = @_;
+    my ($txt,$attrs) = process_file($file,$re);
+    die "$file: no manpage found\n" unless ($txt && $attrs->{name} && $attrs->{sect});
+    my $name = $attrs->{name};
+    my $sect = $attrs->{sect};
+
+    my ($fh,$tn) = tempfile();
+    print $fh $txt;
+    close($fh);
+
+    my $tmpdir = File::Temp->newdir();
+    system('a2x','-D',$tmpdir,'--format=manpage',$tn);
+    unlink($tn);
+    if (-f "$tmpdir/$name.$sect") {
+	# Compare the two files...
+	my $new  = read_file("$tmpdir/$name.$sect");
+	if (-f "$dir/$name.$sect") {
+	    my $orig = read_file("$dir/$name.$sect");
+	    if ($orig eq $new) {
+		return undef;
+	    }
+	}
+	open(my $out,'>',"$dir/$name.$sect") || die("$dir/$name.$sect: $!\n");
+	print $out $new;
+	close($out);
+	print STDERR "Created $dir/$name.$sect\n";
+    } else {
+	die "No output generated\n";
+    }
+    return "$dir/$name.$sect";
+}
+
+
+my $op = 'extract';
+my $outdir = '.';
+my $gzip = 1;
+
+while (scalar(@ARGV)) {
+    if ($ARGV[0] eq '--ext') {
+	$op = 'extract';
+    } elsif ($ARGV[0] eq '--view') {
+	$op = 'view';
+    } elsif ($ARGV[0] eq '--asciidoc') {
+	$op = 'asciidoc';
+    } elsif ($ARGV[0] eq '--genman') {
+	$op = 'genman';
+    } elsif ($ARGV[0] eq '--query') {
+	$op = 'query';
+    } elsif ($ARGV[0] eq '--help' || $ARGV[0] eq '-h') {
+	my ($txt,$attrs) = process_file($0,$re);
+	print $txt,"\n";
+	exit(0);
+    } elsif (substr($ARGV[0],0,5) eq '--re=') {
+	$re = substr($ARGV[0],5);
+	die "No RE specified with --re\n" if ($re eq '');
+    } elsif (substr($ARGV[0],0,2) eq '-D') {
+	my ($l,$r) = split(/\s*=\s*/,substr($ARGV[0],2),2);
+	die "Must specify a variable with -D\n" unless ($l);
+	if ($r ) {
+	    $macros{$l} = $r;
+	} else {
+	    undef $macros{$l};
+	}
+    } elsif (substr($ARGV[0],0,7) eq '--gzip=') {
+	my $bool = substr($ARGV[0],7);
+	$bool =~ tr/A-Z/a-z/;
+	if ($bool eq 'yes' || $bool eq 'true' || $bool eq '1' ||$bool eq 'on') {
+	    $gzip = 1;
+	} elsif ($bool eq 'no'||$bool eq 'false'||$bool eq '0'||$bool eq 'off') {
+	    $gzip = 0;
+	} else {
+	    die "Invalid bool value $bool for --gzip\n";
+	}
+    } elsif (substr($ARGV[0],0,9) eq '--outdir=') {
+	$outdir = substr($ARGV[0],9);
+	die "No outputdir specified with --outdir\n" if ($outdir eq '');
+	die "$outdir: not found\n" unless (-d $outdir);
+    } else {
+	last;
+    }
+    shift;
+}
+
+sub wanted {
+    my $dir = $File::Find::dir;
+    my $f = $_;
+    my $fpath =$File::Find::name;
+    return if ($fpath =~ /\/\.svn\// ||
+	       $fpath =~ /\/\.git\//);
+    return if (/^\./ ||
+	       /~$/  ||
+	       /\.o$/ ||
+	       /^core$/ ||
+	       /\.rpm$/ ||
+	       /\.tar$/ ||
+	       /\.tar\.[^.]+$/);
+    return unless (-f $_);
+    my ($txt,$attrs) = eval { process_file($f,$re) };
+    return if ($@);
+    return unless ($txt && $attrs->{name} && $attrs->{sect});
+
+    if ($outdir eq '.') {
+	do_extract($f,$outdir,$re);
+    } else {
+	my $name = $attrs->{name};
+	my $sect = $attrs->{sect};
+	if (! -d "$outdir/man$sect") {
+	    mkdir("$outdir/man$sect") || die "mkdir($outdir/man$sect): $!\n";
+	}
+	my ($fh,$tn) = tempfile();
+	print $fh $txt;
+	close($fh);
+	system('a2x','-D',"$outdir/man$sect",'--format=manpage',$tn);
+	unlink($tn);
+	if (-f "$outdir/man$sect/$name.$sect" && $gzip) {
+	    if (-f "$outdir/man$sect/$name.$sect.gz") {
+		unlink("$outdir/man$sect/$name.$sect.gz");
+	    }
+	    system('gzip', "$outdir/man$sect/$name.$sect");
+	}
+    }
+}
+die "Nothing to process\nUse -h for help\n" if (scalar(@ARGV) == 0);
+
+if ($op eq 'extract') {
+    foreach my $f (@ARGV) {
+	my $f = do_extract($f,$outdir,$re);
+    }
+} elsif ($op eq 'view') {
+    die "Must specify files to view\n" if (scalar(@ARGV) == 0);
+    my $dir = tempdir(CLEANUP=>1);
+    foreach my $f (@ARGV) {
+	my $f = do_extract($f,$dir,$re);
+	if (-f $f) {
+	    system('man',$f);
+	}
+    }
+} elsif ($op eq 'asciidoc') {
+    die "Must specify files to convert\n" if (scalar(@ARGV) == 0);
+    foreach my $f (@ARGV) {
+	my ($txt,$attrs) = process_file($f,$re);
+	if ($txt && $attrs->{name} && $attrs->{sect}) {
+	    print $f,": ",$attrs->{name}," ",$attrs->{sect},"\n"
+		if (scalar(@ARGV) > 1);
+	    print $txt,"\n";
+	}
+    }
+} elsif ($op eq 'query') {
+    die "Must specify files to query\n" if (scalar(@ARGV) == 0);
+    foreach my $f (@ARGV) {
+	my ($txt,$attrs) = eval { process_file($f,$re) };
+	if ($@) {
+	    warn $@;
+	    next;
+	}
+	if ($txt && $attrs->{name} && $attrs->{sect}) {
+	    print $f,": ",$attrs->{name}," ",$attrs->{sect},"\n";
+	}
+    }
+} elsif ($op eq 'genman') {
+    my $cwd = getcwd();
+    if ($outdir ne '.') {
+	$outdir = abs_path($outdir);
+    }
+    find(\&wanted,@ARGV);
+} else {
+    die "Unknown op: $op\n";
+}
