@@ -1,0 +1,80 @@
+#!/bin/sh
+#
+# Access the REST API
+#
+set -euf -o pipefail
+
+api_url="${API_URL:-https://localhost/api}"
+auth="${API_AUTH:-}"
+
+while [ $# -gt 0 ]
+do
+  case "$1" in
+  --url=*)
+    api_url=${1#--url=}
+    ;;
+  --user-auth=*)
+    auth="--user ${1#--user-auth=}"
+    ;;
+  *)
+    break
+    ;;
+  esac
+  shift
+done
+
+die() {
+  local rc="$1" ; shift
+  echo "$@" 1>&2
+  exit $rc
+}
+
+api() {
+  local verb="$1" ; shift
+  local call="$1" ; shift
+  curl $auth -k -X "$verb" -H 'Accept: application/json' "$@" "$api_url/$call"
+}
+
+op_post() {
+  local payload="$(cat)"
+  api POST "$@" -d "$payload"
+}
+op_get() {
+  local args=''
+  while [ $# -gt 0 ]
+  do
+    case "$1" in
+      --expand)
+	args='?expand=resources'
+	;;
+      --expand=*)
+	args="?expand=${1#--expand=}"
+	;;
+      *)
+	break
+	;;
+    esac
+    shift
+  done
+  if [ $# -eq 0 ] ; then
+    api GET ''
+  elif [ $# -eq 1 ] ; then
+    api GET "$1$args"
+  else
+    echo '{ '
+    q=''
+    for col in "$@"
+    do
+      echo $q
+      echo "\"$col\": "
+      api GET "$col$args"
+      q=","
+    done
+    echo '}'
+  fi
+}
+
+[ $# -eq 0 ] && die 11 "No verb specified"
+verb="$1" ; shift
+type op_"$verb" >/dev/null 2>&1 || die 12 "Unknown verb: $verb"
+op_"$verb" "$@"

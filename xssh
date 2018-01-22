@@ -1,0 +1,65 @@
+#!/bin/sh
+#
+#++
+# = xssh(1)
+# :Revision: 1.0
+# :Author: alejandrol@t-systems.com
+# :man manual: HCM Infiny Project
+#
+# == NAME
+#
+# xssh - SSH wrapper tunned to use bastion and proxy hosts
+#
+# == SYNOPSIS
+#
+# xssh [scp|sftp] ...options...
+#
+# == DESCRIPTION
+#
+# This script will look into the environment variables `BASTION`
+# and `HTTP_PROXY` (or `http_proxy`) and use those to connect
+# to the given host.
+#
+# Any given arguments are passed to SSH.
+#
+# If `scp` or `sftp` is specified, that command will be used
+# instead of `ssh`.
+#
+# == ENVIRONMENT
+#
+# * BASTION : An SSH bastion host ([user@]hostname[:port])
+# * HTTP_PROXY : An HTTP tunnel
+#
+#--
+set -euf -o pipefail
+cmd="ssh"
+if [ $# -gt 0 ] ; then
+  case "$1" in
+    scp)
+      cmd="scp"
+      shift
+      ;;
+    sftp)
+      cmd="sftp"
+      shift
+      ;;
+  esac
+fi
+
+if [ -n "${BASTION:-}" ]; then
+  # We want to use a SSH bastion host, check if a port is specified
+  if grep -q ':[0-9]*$' <<<"$BASTION" ; then
+    host=$(cut -d: -f1 <<<"$BASTION")
+    port=$(cut -d: -f2 <<<"$BASTION")
+    exec $cmd -o ProxyCommand="ssh -p $port $host -W %h:%p" "$@"
+  else
+    exec $cmd -o ProxyCommand="ssh $BASTION -W %h:%p" "$@"
+  fi
+fi
+[ -n "${HTTP_PROXY:-}" ] && [ -z "${http_proxy:-}" ] && http_proxy="$HTTP_PROXY"
+
+if [ -n "${http_proxy:-}" ] ; then
+  exec $cmd -o ProxyCommand="nc --proxy-type http $http_proxy %h %p" "$@"
+fi
+
+exec $cmd "$@"
