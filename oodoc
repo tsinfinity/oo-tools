@@ -179,6 +179,7 @@ sub parse_title_block(\@$$) {
   if ($a =~ /\((\d+)\)$/) {
     # This is a man page...
     $attrs{'title'} = $a;
+    $attrs{'sn'} = $1;
     my $snum = int($1);
     if ($b) {
       my ($a,$c) = split(/\s*\|\s*/,$b,2);
@@ -302,6 +303,22 @@ sub yaml_block(\%) {
   return Dump($meta)."...\n\n";
 }
 
+sub extract_manpage($) {
+  my ($f) = @_;
+  
+  open(my $fh,'<',$f) || die "$f: $!\n";
+  my @out = extract_docstrings($fh,'#++','#--');
+  close($fh);
+  my $meta = get_meta_data(@out);
+  if ($meta) {
+    rm_meta_data(@out,%$meta);
+  } else {
+    $meta = {};
+  }
+  add_meta_data(%$meta,$f);
+  return ($meta,\@out);
+}
+
 if (scalar(@ARGV) == 0) {
   #++
   #
@@ -328,26 +345,49 @@ my $op = shift(@ARGV);
 #
 if ($op eq 'man') {
   #
-  # - **man** _[options]_ **[input_file]**
-  # : Display `UNIX` style man page from the specified source file.
-  #
-  foreach my $f (@ARGV) {
-    open(my $fh,'<',$f) || die "$f: $!\n";
-    my @out = extract_docstrings($fh,'#++','#--');
-    close($fh);
-    my $meta = get_meta_data(@out);
-    if ($meta) {
-      rm_meta_data(@out,%$meta);
+  # - **man** _[options]_ **[input_file]**:
+  #   Display `UNIX` style man page from the specified source file.
+  #   Options:
+  #   * --query=<value>: Just display the <value> from the file metadata.
+  #   * --roff=<output>: Create NROFF file as <output>.
+  #   * --zroff=<output>: Create Gziped NROFF file as <output>.
+  #   * --text : Output Markdown.
+  my $mode = 'view';
+  while (scalar(@ARGV)) {
+    if ($ARGV[0] =~ /^--query=(.*)$/) {
+      $mode = 'query:'.$1;
+    } elsif ($ARGV[0] =~ /^--roff=(.*)$/) {
+      $mode = 'roff:'.$1;
+    } elsif ($ARGV[0] =~ /^--zroff=(.*)$/) {
+      $mode = 'zroff:'.$1;
+    } elsif ($ARGV[0] eq '--text') {
+      $mode = 'txt';
     } else {
-      $meta = {};
+      last;
     }
-    add_meta_data(%$meta,$f);
-    
+    shift;
+  }
+  foreach my $f (@ARGV) {
+    my ($meta,$out) = extract_manpage($f);    
 
-    open(my $of,'| pandoc -s -t man | man -l -') || die "$!\n";
-    print $of title_block(%$meta);
-    print $of join("\n",@out),"\n";
-    close($of);
+    if ($mode =~ /^query:(.*)$/) {
+      print $meta->{$1},"\n";
+    } elsif ($mode =~ /^(z?)roff:(.*)$/) {
+      my $target = $2;
+      my $z = $1;
+      open(my $of,'| pandoc -s -t man '.($z ? '| gzip ' : '').' > '.$target )|| die "$!\n";
+      print $of title_block(%$meta);
+      print $of join("\n",@$out),"\n";
+      close($of);      
+    } elsif ($mode eq 'txt') {
+      print title_block(%$meta);
+      print join("\n",@$out),"\n";
+    } else {
+      open(my $of,'| pandoc -s -t man | man -l -') || die "$!\n";
+      print $of title_block(%$meta);
+      print $of join("\n",@$out),"\n";
+      close($of);
+    }
     
     #print man_title_block(%$meta);
     #use Data::Dumper;
@@ -357,17 +397,7 @@ if ($op eq 'man') {
   }
 } elsif ($op eq 't') {
   foreach my $f (@ARGV) {
-    open(my $fh,'<',$f) || die "$f: $!\n";
-    my @out = extract_docstrings($fh,'#++','#--');
-    close($fh);
-    my $meta = get_meta_data(@out);
-    if ($meta) {
-      rm_meta_data(@out,%$meta);
-    } else {
-      $meta = {};
-    }
-    add_meta_data(%$meta,$f);
-    
+    my ($meta,$out) = extract_manpage($f);
     print yaml_block(%$meta);
   }
 } else {

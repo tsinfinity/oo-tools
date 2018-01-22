@@ -1,20 +1,17 @@
 #!/bin/sh
 #
 #++
-# = xssh(1)
-# :Revision: 1.0
-# :Author: alejandrol@t-systems.com
-# :man manual: HCM Infiny Project
+# % xssh(1)	Infinity utilities
 #
-# == NAME
+# # NAME
 #
 # xssh - SSH wrapper tunned to use bastion and proxy hosts
 #
-# == SYNOPSIS
+# # SYNOPSIS
 #
-# xssh [scp|sftp] ...options...
+# **xssh** _[scp|sftp]_ _...options..._
 #
-# == DESCRIPTION
+# # DESCRIPTION
 #
 # This script will look into the environment variables `BASTION`
 # and `HTTP_PROXY` (or `http_proxy`) and use those to connect
@@ -25,7 +22,7 @@
 # If `scp` or `sftp` is specified, that command will be used
 # instead of `ssh`.
 #
-# == ENVIRONMENT
+# # ENVIRONMENT
 #
 # * BASTION : An SSH bastion host ([user@]hostname[:port])
 # * HTTP_PROXY : An HTTP tunnel

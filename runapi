@@ -1,18 +1,36 @@
 #!/bin/sh
+#++
+# % runapi(1)	Infinity utilities
 #
-# Access the REST API
+# # NAME
 #
+# runapi - Basic script to call REST APIs
+#
+# # SYNOPSIS
+#
+# **runapi** _--url=[url]_ _--user-auth=user:passwd_ **op** _[options]_
+#
+# # DESCRIPTION
+#
+# **runapi** is a script to call CloudForms REST APIs.
+#
+#--
 set -euf -o pipefail
 
 api_url="${API_URL:-https://localhost/api}"
 auth="${API_AUTH:-}"
 
+#++
+# # GLOBAL OPTIONS
+#
 while [ $# -gt 0 ]
 do
   case "$1" in
+  # - --url=[url] : URL to the REST API end point.
   --url=*)
     api_url=${1#--url=}
     ;;
+  # - --user-auth=[user]:[passwd] : authentication information
   --user-auth=*)
     auth="--user ${1#--user-auth=}"
     ;;
@@ -22,6 +40,8 @@ do
   esac
   shift
 done
+#
+#--
 
 die() {
   local rc="$1" ; shift
@@ -35,18 +55,30 @@ api() {
   curl $auth -k -X "$verb" -H 'Accept: application/json' "$@" "$api_url/$call"
 }
 
+#++
+#
+# ## OPERATIONS
+#
+# - **post** _[options]_ ::
+#   Read from standard input and post to REST API end-point
 op_post() {
   local payload="$(cat)"
   api POST "$@" -d "$payload"
 }
+# - **get** _[options]_ ::
+#   Call REST API and show the results.
+#   Options:
 op_get() {
   local args=''
   while [ $# -gt 0 ]
   do
     case "$1" in
+      #    - --expand
+      #        Expand resources.
       --expand)
 	args='?expand=resources'
 	;;
+      #    - --expand=_values_
       --expand=*)
 	args="?expand=${1#--expand=}"
 	;;
@@ -73,8 +105,17 @@ op_get() {
     echo '}'
   fi
 }
+#--
 
 [ $# -eq 0 ] && die 11 "No verb specified"
 verb="$1" ; shift
 type op_"$verb" >/dev/null 2>&1 || die 12 "Unknown verb: $verb"
 op_"$verb" "$@"
+
+#++
+#
+# # ENVIRONEMNT
+#
+# * API_URL : URL to the REST API end-point
+# * API_AUTH : Arguments used for API authentication.
+#--
