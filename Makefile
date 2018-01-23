@@ -17,7 +17,7 @@ install:
 	for n in $$(perl oodoc genman $(SCRIPTS)) ;\
 	do \
 		b=$$(basename $$n) ;\
-		install --compare -D --mode=0644 $$b $(MANDIR)/$$b ;\
+		install --compare -D --mode=0644 $$b $(MANDIR)/$$n ;\
 		rm -f $$b ;\
 	done
 
