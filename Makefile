@@ -1,5 +1,5 @@
 #
-SCRIPTS=oodoc runapi xssh
+SCRIPTS=oodoc xssh
 BINDIR=/usr/bin
 MANDIR=/usr/share/man
 
@@ -13,11 +13,12 @@ install:
 	for n in $(SCRIPTS) ;\
 	do \
 		install --compare -D --mode=0755 $$n $(BINDIR)/$$n ;\
-		mann=$$(perl oodoc man --query=sn $$n) ;\
-		pg=$$n.$$mann.gz ;\
-		perl oodoc man --zroff=$$pg $$n ;\
-		install --compare -D --mode=0644 $$pg $(MANDIR)/man$$mann/$$pg ;\
-		rm -f $$pg ;\
+	done
+	for n in $$(perl oodoc genman $(SCRIPTS)) ;\
+	do \
+		b=$$(basename $$n) ;\
+		install --compare -D --mode=0644 $$b $(MANDIR)/$$b ;\
+		rm -f $$b ;\
 	done
 
 uninstall:
@@ -32,4 +33,3 @@ deps:
 	yum install -y epel-release
 	yum install -y openssh-clients nmap-ncat
 	yum install -y pandoc perl perl-YAML
-	yum install -y curl jq

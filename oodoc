@@ -231,10 +231,10 @@ sub rm_meta_data(\@\%) {
 sub add_meta_data(\%$) {
   my ($meta,$fn) = @_;
 
-  unless ($meta->{'title'}) {
-    my ($a,$b,$c) = fileparse($fn,qr/\.[^.]*$/);
-    $meta->{'title'} = uc($a).'(1)';
-  }
+  $meta->{'filename'} = $fn unless ($meta->{'filename'});
+  my ($a,$b,$c) = fileparse($fn,qr/\.[^.]*$/);
+  $meta->{'docname'} = $a unless ($meta->{'docname'});
+  $meta->{'title'} = uc($a).'(1)' unless ($meta->{'title'});
   unless ($meta->{'author'}) {
     # First we try to do it via git
     my $t = `git log -1 --format='%aN' "$fn" 2>/dev/null`;
@@ -349,17 +349,14 @@ if ($op eq 'man') {
   #   Display `UNIX` style man page from the specified source file.
   #   Options:
   #   * --query=<value>: Just display the <value> from the file metadata.
-  #   * --roff=<output>: Create NROFF file as <output>.
-  #   * --zroff=<output>: Create Gziped NROFF file as <output>.
+  #   * --roff: Output NROFF format.
   #   * --text : Output Markdown.
   my $mode = 'view';
   while (scalar(@ARGV)) {
     if ($ARGV[0] =~ /^--query=(.*)$/) {
       $mode = 'query:'.$1;
-    } elsif ($ARGV[0] =~ /^--roff=(.*)$/) {
-      $mode = 'roff:'.$1;
-    } elsif ($ARGV[0] =~ /^--zroff=(.*)$/) {
-      $mode = 'zroff:'.$1;
+    } elsif ($ARGV[0] eq '--roff') {
+      $mode = 'roff';
     } elsif ($ARGV[0] eq '--text') {
       $mode = 'txt';
     } else {
@@ -368,14 +365,15 @@ if ($op eq 'man') {
     shift;
   }
   foreach my $f (@ARGV) {
-    my ($meta,$out) = extract_manpage($f);    
-
+    my ($meta,$out) = extract_manpage($f);
+    if (scalar(@$out) == 0) {
+      warn "$f: no documentation found\n";
+      next;
+    }
     if ($mode =~ /^query:(.*)$/) {
       print $meta->{$1},"\n";
-    } elsif ($mode =~ /^(z?)roff:(.*)$/) {
-      my $target = $2;
-      my $z = $1;
-      open(my $of,'| pandoc -s -t man '.($z ? '| gzip ' : '').' > '.$target )|| die "$!\n";
+    } elsif ($mode eq 'roff') {
+      open(my $of,'| pandoc -s -t man')|| die "$!\n";
       print $of title_block(%$meta);
       print $of join("\n",@$out),"\n";
       close($of);      
@@ -389,11 +387,65 @@ if ($op eq 'man') {
       close($of);
     }
     
-    #print man_title_block(%$meta);
-    #use Data::Dumper;
-    #print Dumper($meta);
-    #print "====",$f,"\n" if (scalar(@ARGV) > 1);
-    #print join("\n",@out),"\n==\n";
+  }
+} elsif ($op eq 'genman') {
+  #
+  # - **genman** _[options]_ **[input_files]**:
+  #   Generate `UNIX` style man page from the specified source file.
+  #   Options:
+  #   * --gzip: Gzip output (this is the default)
+  #   * --no-gzip: Disable Gzip output
+  #   * --showdir : Display section directory (this is the default)
+  #   * --no-showdir : Do not display section directory
+  #   * --subs : Create sub-directories for man sections
+  #   * --outdir=path : create files in the specified directory
+  my $gzip = 1;
+  my $outdir = '';
+  my $showdir = 1;
+  my $subs = 0;
+  
+  my $mode = 'view';
+  while (scalar(@ARGV)) {
+    if ($ARGV[0] eq '--gzip') {
+      $gzip = 1;
+    } elsif ($ARGV[0] eq '--no-gzip') {
+      $gzip = 0;
+    } elsif ($ARGV[0] eq '--showdir') {
+      $showdir = 1;
+    } elsif ($ARGV[0] eq '--no-showdir') {
+      $showdir = 0;
+    } elsif ($ARGV[0] eq '--subs') {
+      $subs = 1;
+    } elsif ($ARGV[0] =~ /^--outdir=(.*)$/) {
+      $outdir = $1;
+      $outdir =~ s/\/*$//;
+    } else {
+      last;
+    }
+    shift;
+  }
+  foreach my $f (@ARGV) {
+    my ($meta,$out) = extract_manpage($f);
+    if (scalar(@$out) == 0) {
+      warn "$f: no documentation found\n";
+      next;
+    }
+    my $md = 'man'.$meta->{'sn'}.'/';
+    my $fn = $meta->{'docname'}.'.'.$meta->{'sn'};
+    
+    if ($subs && ! -d $outdir.$md) {
+      mkdir($outdir.$md,0777) || die "mkdir: $!\n";
+    }
+    print $md if ($showdir);
+    print $fn;
+    print '.gz' if ($gzip);
+    print "\n";
+    open(my $of,'| pandoc -s -t man '.($gzip ? ' | gzip ' : '').
+		' > '.$outdir.($subs ? $md : '').$fn.
+		($gzip ? '.gz' : '')) || die "$!\n";
+    print $of title_block(%$meta);
+    print $of join("\n",@$out),"\n";
+    close($of);
   }
 } elsif ($op eq 't') {
   foreach my $f (@ARGV) {
