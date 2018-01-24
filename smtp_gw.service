@@ -1,0 +1,13 @@
+[Unit]
+Description=SMTP to MailGun API gateway
+After=network.target
+
+[Service]
+Type=simple
+User=mail
+ExecStart=/usr/bin/smtp_gw
+Restart=on-abort
+EnvironmentFile=/etc/smtp_gw.config
+
+[Install]
+WantedBy=multi-user.target

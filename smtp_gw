@@ -1,0 +1,101 @@
+#!/usr/bin/env python
+#++
+# % smtp_gw(1)	Infinity utilities
+#
+# # NAME
+#
+# smtp_gw - SMTP to MailGun API gateway
+#
+# # SYNOPSIS
+#
+# **smtp_gw**
+#
+# # DESCRIPTION
+#
+# Accepts RFC2822 messages and sends them on using MailGun
+# through a REST API call.
+#
+# This is needed for OTC, because OTC blocks SMTP out-going
+# traffic.
+#
+# This script is meant to be executed as a systemd(1) unit
+# and configured through environment files (using
+# EnvironmentFile)
+#
+# # ENVIRONMENT
+#
+# * MAILGUN_API_KEY : MailGun API key.  See MailGun domain page
+# * MAILGUN_API_URL : MailGun URL domain.  See MailGun domain page
+# * MAILGUN_ALLOWED : List of IP addresses allowed
+#
+# # FILES
+#
+# * /etc/smtp_gw.config - Configuration environment
+#
+#--
+#
+#   Copyright (C) 2018 Alejandro Liu Ly
+#
+#   This is free software; you can redistribute it and/or modify
+#   it under the terms of the GNU General Public License as
+#   published by the Free Software Foundation; either version 2 of 
+#   the License, or (at your option) any later version.
+#
+#   This software is distributed in the hope that it will be useful,
+#   but WITHOUT ANY WARRANTY; without even the implied warranty of
+#   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#   GNU General Public License for more details.
+#
+#   You should have received a copy of the GNU General Public
+#   License along with this program.  If not, see 
+#   <http://www.gnu.org/licenses/>
+#
+
+import asyncore
+from smtpd import SMTPServer
+import fnmatch
+import requests
+import os
+
+#from email.parser import Parser
+#from pprint import pprint
+#from datetime import datetime
+
+API_KEY = os.environ['MAILGUN_API_KEY']
+API_URL = os.environ['MAILGUN_API_URL']
+allow_list = os.environ['MAILGUN_ALLOWED'].split(",")
+
+class EmlServer(SMTPServer):
+  def process_message(self, peer, mailfrom, rcpttos, data):
+    peer_ip = peer[0]
+    allowed = 0
+    
+    for rule in allow_list:
+      if fnmatch.fnmatch(peer_ip,rule):
+	allowed = 1
+	break
+    
+    if not allowed :
+      print 'Peer :%s is not allowed' % peer_ip
+      return
+
+    request_url = 'https://api.mailgun.net/v3/{0}/messages.mime'.format(API_URL)
+    request = requests.post(request_url, auth=('api', API_KEY), data={
+      'to': ",".join(rcpttos)
+    }, files={
+      'message': data
+    })
+    print 'Peer:   {0}'.format(peer_ip)
+    print 'Status: {0}'.format(request.status_code)
+    print 'Body:   {0}'.format(request.text)
+      
+
+def run():
+  foo = EmlServer(('localhost', 1025), None)
+  try:
+    asyncore.loop()
+  except KeyboardInterrupt:
+    pass
+
+if __name__ == '__main__':
+  run()
