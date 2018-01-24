@@ -27,6 +27,8 @@
 # * MAILGUN_API_KEY : MailGun API key.  See MailGun domain page
 # * MAILGUN_API_URL : MailGun URL domain.  See MailGun domain page
 # * MAILGUN_ALLOWED : List of IP addresses allowed
+# * SMTP_LISTEN : IP address to bind
+# * SMTP_PORT : Port to use
 #
 # # FILES
 #
@@ -91,7 +93,7 @@ class EmlServer(SMTPServer):
       
 
 def run():
-  foo = EmlServer(('localhost', 1025), None)
+  foo = EmlServer((os.environ['SMTP_LISTEN'], int(os.environ['SMTP_PORT'])), None)
   try:
     asyncore.loop()
   except KeyboardInterrupt:

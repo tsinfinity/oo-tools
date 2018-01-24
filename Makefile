@@ -21,7 +21,7 @@ install:
 		rm -f $$b ;\
 	done
 	install --compare -D --mode=0644 smtp_gw.service /etc/systemd/system/smtp_gw.service
-	[ ! -f /etc/smtp_gw.config ] && install --mode=0644 smtp_gw.config /etc/smtp_gw.config
+	[ ! -f /etc/smtp_gw.config ] && install --mode=0644 smtp_gw.config /etc/smtp_gw.config || :
 
 uninstall:
 	for n in $(SCRIPTS) ;\
