@@ -39,6 +39,7 @@ BEGIN {
   }
 }
 
+my $verbose = 1;
 my @sect_titles = ('','User commands','System calls','Library functions',
 		   'Special files','File formats','Games','Miscellaneous',
 		   'System administration','Linux kernel');
@@ -140,7 +141,7 @@ sub get_meta_data(\@) {
 	    my $yin = parse_yaml_block($res,$start,$i);
 	    last unless ($yin);
 
-	    my %loop = (':offset' => $start, ':length' => $i-$start);
+	    my %loop = (':offset' => $start, ':length' => $i-$start+1);
 	    while (my ($k,$v) = each %loop) {
 	      if (exists $yaml{$k}) {
 		if (ref($yaml{$k})) {
@@ -160,6 +161,7 @@ sub get_meta_data(\@) {
       $prev = $res->[$i];
     }
     return \%yaml if (scalar(%yaml));
+    return undef;
   }
   
   # 
@@ -228,52 +230,63 @@ sub rm_meta_data(\@\%) {
   return 1;
 }
 
-sub add_meta_data(\%$) {
-  my ($meta,$fn) = @_;
+sub file_attributes($) {
+  my ($f) = @_;
+  my %attr = ();
+  $attr{'FileName'} = $f;
+  ($attr{'DocName'},$attr{'Dir'},$attr{'Ext'}) = fileparse($f,qr/\.[^.]*$/);
 
-  $meta->{'filename'} = $fn unless ($meta->{'filename'});
-  my ($a,$b,$c) = fileparse($fn,qr/\.[^.]*$/);
-  $meta->{'docname'} = $a unless ($meta->{'docname'});
-  $meta->{'title'} = uc($a).'(1)' unless ($meta->{'title'});
-  unless ($meta->{'author'}) {
-    # First we try to do it via git
-    my $t = `git log -1 --format='%aN' "$fn" 2>/dev/null`;
+  my ($t);
+  # Get author...
+  # First we try to do it via git
+  $t = `git log -1 --format='%aN' "$f" 2>/dev/null`;
+  if ($t) {
+    chomp($t);
+    $attr{'Author'} = $t;
+  } else {
+    # Otherwise, try through filesystem...
+    my ($uid) = (stat($f))[4];
+    $attr{'Author'} = getpwuid($uid);
+  }
+  # Get last update date...
+  # First we try to do it via git
+  $t = `git log -1 --date=short --format='%ad' "$f" 2>/dev/null`;
+  if ($t) {
+    chomp($t);
+    $attr{'Date'} = $t;
+  } else {
+    # Otherwise, try through filesystem...
+    my ($mtime) = (stat($f))[9];
+    my ($mday,$mon,$year) = (localtime($mtime))[3..6];
+    $attr{'Date'} = sprintf('%04d-%02d-%02d',$year+1900,$mon+1,$mday);
+  }
+  
+  # Get the revision info... 
+  # First try to do it via tags...
+  $t = `cd "$attr{Dir}" && git describe --dirty=-EXP 2>/dev/null`;
+  if ($t) {
+    chomp($t);
+    $attr{'Revision'} = $t;
+  } else {
+    # Try it from log info
+    $t = `git log -1 --format='%h' "$f" 2>/dev/null`;
     if ($t) {
       chomp($t);
-      $meta->{'author'} = $t;
-    } else {
-      # Otherwise, try through filesystem...
-      my ($uid) = (stat($fn))[4];
-      $meta->{'author'} = getpwuid($uid);
+      $attr{'Revision'} = $t;
     }
   }
-  unless ($meta->{'date'}) {
-    # First we try to do it via git
-    my $t = `git log -1 --date=short --format='%ad' "$fn" 2>/dev/null`;
-    if ($t) {
-      chomp($t);
-      $meta->{'date'} = $t;
-    } else {
-      # Otherwise, try through filesystem...
-      my ($mtime) = (stat($fn))[9];
-      my ($mday,$mon,$year) = (localtime($mtime))[3..6];
-      $meta->{'date'} = sprintf('%04d-%02d-%02d',$year+1900,$mon+1,$mday);
-    }
+  return \%attr;
+}
+
+sub add_man_meta_data(\%$) {
+  my ($meta,$fn) = @_;
+  my $fattr = file_attributes($fn);
+  foreach my $k (keys %$fattr) {
+    my $j = lc($k);
+    next if ($meta->{$j});
+    $meta->{$j} = $fattr->{$k};
   }
-  unless ($meta->{'revision'}) {
-    # First try to do it via tags...
-    my $t = `git describe --dirty=-EXP 2>/dev/null`;
-    if ($t) {
-      chomp($t);
-      $meta->{'revision'} = $t;
-    } else {
-      my $b = `git log -1 --format='%h' "$fn" 2>/dev/null`;
-      if ($b) {
-	chomp($b);
-	$meta->{'revision'} = $b;
-      }
-    }
-  }
+  $meta->{'title'} = uc($meta->{'docname'}).'(1)' unless ($meta->{'title'});
 }
 
 sub title_block(\%) {
@@ -298,9 +311,10 @@ sub title_block(\%) {
   return $txt;
 }
 
-sub yaml_block(\%) {
-  my ($meta) = @_;
-  return Dump($meta)."...\n\n";
+sub yaml_block(\%;$) {
+  my ($meta,$end) = @_;
+  $end = '...' unless ($end);
+  return Dump($meta).$end."\n\n";
 }
 
 sub extract_manpage($) {
@@ -315,8 +329,110 @@ sub extract_manpage($) {
   } else {
     $meta = {};
   }
-  add_meta_data(%$meta,$f);
+  add_man_meta_data(%$meta,$f);
   return ($meta,\@out);
+}
+
+sub exdoc_dir(\%$) {
+  my ($out,$d) = @_;
+  my @subs = ( $d );
+  
+  while (scalar(@subs)) {
+    $d = shift @subs;
+    opendir(my $dh,$d) || die("$d: $!\n");
+    while (my $n = readdir($dh)) {
+      next if ($n eq '.' || $n eq '..' || substr($n,0,1) eq '.');
+      # We should filter things here
+      my $fp = $d.$n;
+      next if (-l $fp);
+      if (-d $fp) {
+	next if (-f $fp.'/.git'); #Skip git sub-modules
+	push @subs,$fp.'/';
+      } elsif (-f $fp) {
+	exdoc_file($out,$d.$n);
+      }
+    }
+    closedir($dh);
+  }
+}
+
+sub exdoc_file(\%$) {
+  my ($out,$f) = @_;
+  
+  my ($name,$dir,$suffix) = fileparse($f,qr/\.[^.]*/);
+  print STDERR "$f ($name - $suffix): " if ($verbose);
+    
+  open(my $fh,'<',$f) || die "$f: $!\n";
+  my @out = ();
+  if (lc($suffix) eq '.md') {
+    while (<$fh>) {
+      s/\s+$//;
+      push @out,$_;
+    }
+  } else {
+    @out = extract_docstrings($fh,'#<<','#>>');
+  }
+  close($fh);
+  
+  my ($outfile,$sect,$cnt) = ($name,'',0);
+  foreach my $ln (@out) {
+    if ($ln =~ /^\s*%\s*(\S*)(.*)$/) {
+      $outfile = $1 ? $1 : $name;
+      my $lopts = $2;
+      my ($x,$y) = split(/#/,$outfile);
+      if ($y) {
+	$outfile = $x;
+	$sect = $y;
+      }
+      if ($lopts) {
+	$out->{$outfile} = {} unless ($out->{$outfile});
+	$out->{$outfile}->{$sect} = [] unless ($out->{$outfile}->{$sect});
+	unshift @{$out->{$outfile}->{$sect}}, $lopts; ++$cnt;
+	print "LOPTS: $lopts\n";
+      }
+      next;
+    }
+    if (!(exists $out->{$outfile} && exists $out->{$outfile}->{$sect})) {
+      next if ($ln eq ''); # Skip empty lines at the top...
+    }
+    $out->{$outfile} = {} unless ($out->{$outfile});
+    $out->{$outfile}->{$sect} = [] unless ($out->{$outfile}->{$sect});
+    if (scalar(@{$out->{$outfile}->{$sect}}) == 0) {
+      # Create a default metadata block...
+      my $fattr = file_attributes($f);
+      push @{$out->{$outfile}->{$sect}},'';
+      push @{$out->{$outfile}->{$sect}},split(/\s*\n/,Dump($fattr));
+      push @{$out->{$outfile}->{$sect}},'---';
+      push @{$out->{$outfile}->{$sect}},'';
+    }
+    #print STDERR "$outfile,$sect: $out->{$outfile}->{$sect}\n";
+    push @{$out->{$outfile}->{$sect}},$ln; ++$cnt;
+  }
+  print STDERR $cnt,"\n";
+}
+
+sub cms_out($\%) {
+  my ($outdir,$dat) = @_;
+  
+  if (! -d $outdir) {
+    mkdir($outdir,0777) || die("mkdir($outdir): $!\n");
+  }
+  my %index = ();
+  while (my ($f,$s) = each %$dat) {
+    my @odat = ();
+    foreach my $sn (sort keys %$s) {
+      push @odat, @{$s->{$sn}};
+    }
+    #print join("\n",@odat),"\n\n=\n\n";
+    my $meta = get_meta_data(@odat);
+    rm_meta_data(@odat,%$meta);
+    $meta->{'title'} = ucfirst($f) unless ($meta->{'Title'});
+    print STDERR "Writing $f..";
+    open(my $fh,'>',$outdir.$f.'.md') || die("$f: $!\n");
+    print $fh yaml_block(%$meta,'---'), join("\n",@odat),"\n";
+    close($fh);
+    print STDERR ".OK\n";
+  }
 }
 
 if (scalar(@ARGV) == 0) {
@@ -447,6 +563,49 @@ if ($op eq 'man') {
     print $of join("\n",@$out),"\n";
     close($of);
   }
+} elsif ($op eq 'exdoc') {
+  #
+  # - **gendoc** _[options]_ **[input_files]**:
+  #   Extract `Markdown` documentation from the specified files
+  #   Options:
+  #   * --outdir=path : create files in the specified directory
+  #   * --recursive|-r : recursively extract from directories
+  #   * --no-recursive|+r : disable recursive extraction
+  my $outdir = '';
+  my %data = ();
+  my $recursive = 1;
+  
+  while (scalar(@ARGV)) {
+    if ($ARGV[0] =~ /^--outdir=(.*)$/) {
+      $outdir = $1;
+      $outdir =~ s!/*$!/!;
+    } elsif ($ARGV[0] eq '--no-recursive' || $ARGV[0] eq '+r') {
+      $recursive = 0;
+    } elsif ($ARGV[0] eq '--recursive' || $ARGV[0] eq '-r') {
+      $recursive = 1;
+    } else {
+      last;
+    }
+    shift;
+  }
+  die("No --outdir specified\n") unless ($outdir);
+  foreach my $f (@ARGV) {
+    if (-l $f) {
+      warn "$f: is a symlink, ignoring\n";
+    } elsif (-d $f) {
+      if ($recursive) {
+	$f =~ s!/*$!/!;
+	exdoc_dir(%data,$f);
+      } else {
+	warn "$f: is a directory, ignoring\n";
+      }
+    } elsif (-f $f) {
+      exdoc_file(%data,$f);
+    } else {
+      warn "$f: Invalid file, skipping\n";
+    }
+  }
+  cms_out($outdir,%data);
 } elsif ($op eq 't') {
   foreach my $f (@ARGV) {
     my ($meta,$out) = extract_manpage($f);
@@ -456,6 +615,7 @@ if ($op eq 'man') {
   die "Unknown subcmd: $op\n";
 }
 #--
+
 
 #++
 #
@@ -551,51 +711,64 @@ if ($op eq 'man') {
 
 __END__
 
-Todo
+#<<
+# % todo
+#
+# # TODO
+#
+# % references
+#
+# # REFERENCES
+#
+# % references#pandoc
+#
+# * https://pandoc.org/MANUAL.html#metadata-blocks
+# * http://jeromebelleman.gitlab.io/posts/publishing/manpages/
+#
+# % notes
+#
+# `oodoc` should be able to generate documentation/notes files
+# and export them to a CMS.
+#
+# * CMS
+#   - https://github.com/jumbojett/OpenID-Connect-PHP
+#   - https://getgrav.org/downloads
+#   - http://picocms.org/download/
+#
+# * Criteria
+#   1. Size
+#   2. Markdown
+#   3. Flat File
+#   4. Plugins & Themes
+#   5. User access with KeyCloak
+#
+# % todo#MVP
+#
+# - MVP
+#   - [x] viewer for man pages
+#   - [ ] extract to flat-file CMS
+#
+# - Modes
+#   - strip : remove all docstrings...
+#   - man : create man pages
+#   - viewer
+#   - generate man pages for pkgs
+# - help : in-line help
+#   - for scripts
+#   - for compiled files
+# - multi-file documetation for flat-file CMS
+#   - pico (smaller footprint)
+#     - ++generate of diagrams using asciiart to png/svg
+#     - ++authentication against keycloak
+#       - openid connect
+#       - auth_mellon
+#   - grav
+# - doxygen?
+#
+#>>
 
-https://pandoc.org/MANUAL.html#metadata-blocks
-http://jeromebelleman.gitlab.io/posts/publishing/manpages/
-
-CMS
-- https://github.com/jumbojett/OpenID-Connect-PHP
-- https://getgrav.org/downloads
-- http://picocms.org/download/
-
-1. Size
-2. Markdown
-3. Flat File
-4. Plugins & Themes
-5. User access with KeyCloak
-
-
-- MVP
-  - viewer for man pages
-  - extract to flat-file CMS
-
-Modes
-
-- strip : remove all docstrings...
-- man : create man pages
-  - viewer
-  - generate man pages for pkgs
-- help : in-line help
-  - for scripts
-  - for compiled files
-- multi-file documetation for flat-file CMS
-  - pico (smaller footprint)
-    - ++generate of diagrams using asciiart to png/svg
-    - ++authentication against keycloak
-      - openid connect
-      - auth_mellon
-  - grav
-- doxygen?
-
-
-
-__END__
 
  
-    close($fh);
     if (scalar(%macros)) {
 	my $regex = join '|', map quotemeta, keys %macros;
 	$txt =~ s/($regex)/$macros{$1}/g;
@@ -603,8 +776,6 @@ __END__
 	    $attrs{$k} =~ s/($regex)/$macros{$1}/g;
 	}
     }
-    return ($txt,\%attrs);
-}
 
 
 
@@ -614,284 +785,3 @@ __END__
 
 
 
-
-use Cwd qw(getcwd abs_path);
-use File::Find;
-
-
-# # MODES
-#
-# ```
-sub my code($$) {
-  return 5;
-}
-# ```
-# *--ext*::
-#    Extract man page.  This is the default.
-# *--view*::
-#    Preview man page.
-# *--asciidoc*::
-#    Extract *AsciiDoc* document.
-# *--genman*::
-#    Scan source directory and generate man pages.
-# *--query*::
-#    Query source and return manpage and section.
-#
-# # OPTIONS
-#
-# *--re=* re::
-#    Specified the regular expression to use for searching for comments
-# *--gzip=* yes|no::
-#    When in *genman* mode to `man` directory, files will be compressed.
-# *--outdir=* dir::
-#    manpages will be created in the *dir*.  If not specified it will
-#    default to the current directory.  If in *genman* mode, manpages
-#    will be created in the appropriate section directory.
-# *-D* _var=value_::
-#    Add a macro substitution value.
-#
-#
-# # HISTORY
-#
-# This was based on an old script named *srctoman* by W.Z. Venema,
-# from 1986.  Later was implemented as a *tclsh* script in 2007
-# that implemented its own (very limited) wiki markup.
-#
-# # SEE ALSO
-#
-#    a2x(1), man(1)
-#
-#--
-my $re = "^\\s*([*#]|\\/\\/)\\s?";
-my %macros = ();
-sub process_file {
-    my ($file,$re) = @_;
-
-    open(my $fh,'<',$file) || die "$file: $!\n";
-    #
-    # Search for beginning of man data
-    #
-    while (<$fh>) {
-	last if (/$re\+\+/);
-    }
-    die "$file: no embedded documentation\n" if (eof($fh));
-
-    my $txt = '';
-    my %attrs = ();
-
-    while (<$fh>) {
-	last if (/$re--/);
-	s/\s+$//;
-	if (s/$re//) {
-	    $txt .= $_."\n";
-	    if (/^\s*=\s+/ && /\((\d+)\)$/) {
-		my $sect = int($1);
-		my $mtime = (stat($file))[9];
-		my @lt = localtime($mtime);
-		$txt .= ":doctype:\tmanpage\n";
-		$txt .= sprintf(":Date:\t%04d-%02d-%02d\n",
-				$lt[5]+1900,$lt[4]+1,$lt[3]);
-		if ($sect_titles[$sect]) {
-		    $txt .= ":man manual:\t".$sect_titles[$sect]."\n";
-		}
-		$txt .= ":man source:\t".basename($file)."\n";
-		$attrs{sect} = $sect;
-		s/^\s*=\s+//;
-		s/\(\d+\)$//;
-		s/\s+$//;
-		s/^\s+//;
-		tr/A-Z/a-z/;
-		$attrs{name} = $_;
-
-	    }
-	}
-    }
-    close($fh);
-    if (scalar(%macros)) {
-	my $regex = join '|', map quotemeta, keys %macros;
-	$txt =~ s/($regex)/$macros{$1}/g;
-	foreach my $k (keys %attrs) {
-	    $attrs{$k} =~ s/($regex)/$macros{$1}/g;
-	}
-    }
-    return ($txt,\%attrs);
-}
-
-sub read_file {
-    my ($fn) = @_;
-    local $/=undef;
-    open(my $file,'<',$fn) || die("$fn: $!\n");
-    my $x = <$file>;
-    close $file;
-    return $x;
-}
-
-sub do_extract {
-    my ($file,$dir,$re) = @_;
-    my ($txt,$attrs) = process_file($file,$re);
-    die "$file: no manpage found\n" unless ($txt && $attrs->{name} && $attrs->{sect});
-    my $name = $attrs->{name};
-    my $sect = $attrs->{sect};
-
-    my ($fh,$tn) = tempfile();
-    print $fh $txt;
-    close($fh);
-
-    my $tmpdir = File::Temp->newdir();
-    system('a2x','-D',$tmpdir,'--format=manpage',$tn);
-    unlink($tn);
-    if (-f "$tmpdir/$name.$sect") {
-	# Compare the two files...
-	my $new  = read_file("$tmpdir/$name.$sect");
-	if (-f "$dir/$name.$sect") {
-	    my $orig = read_file("$dir/$name.$sect");
-	    if ($orig eq $new) {
-		return undef;
-	    }
-	}
-	open(my $out,'>',"$dir/$name.$sect") || die("$dir/$name.$sect: $!\n");
-	print $out $new;
-	close($out);
-	print STDERR "Created $dir/$name.$sect\n";
-    } else {
-	die "No output generated\n";
-    }
-    return "$dir/$name.$sect";
-}
-
-
-my $op = 'extract';
-my $outdir = '.';
-my $gzip = 1;
-
-while (scalar(@ARGV)) {
-    if ($ARGV[0] eq '--ext') {
-	$op = 'extract';
-    } elsif ($ARGV[0] eq '--view') {
-	$op = 'view';
-    } elsif ($ARGV[0] eq '--asciidoc') {
-	$op = 'asciidoc';
-    } elsif ($ARGV[0] eq '--genman') {
-	$op = 'genman';
-    } elsif ($ARGV[0] eq '--query') {
-	$op = 'query';
-    } elsif ($ARGV[0] eq '--help' || $ARGV[0] eq '-h') {
-	my ($txt,$attrs) = process_file($0,$re);
-	print $txt,"\n";
-	exit(0);
-    } elsif (substr($ARGV[0],0,5) eq '--re=') {
-	$re = substr($ARGV[0],5);
-	die "No RE specified with --re\n" if ($re eq '');
-    } elsif (substr($ARGV[0],0,2) eq '-D') {
-	my ($l,$r) = split(/\s*=\s*/,substr($ARGV[0],2),2);
-	die "Must specify a variable with -D\n" unless ($l);
-	if ($r ) {
-	    $macros{$l} = $r;
-	} else {
-	    undef $macros{$l};
-	}
-    } elsif (substr($ARGV[0],0,7) eq '--gzip=') {
-	my $bool = substr($ARGV[0],7);
-	$bool =~ tr/A-Z/a-z/;
-	if ($bool eq 'yes' || $bool eq 'true' || $bool eq '1' ||$bool eq 'on') {
-	    $gzip = 1;
-	} elsif ($bool eq 'no'||$bool eq 'false'||$bool eq '0'||$bool eq 'off') {
-	    $gzip = 0;
-	} else {
-	    die "Invalid bool value $bool for --gzip\n";
-	}
-    } elsif (substr($ARGV[0],0,9) eq '--outdir=') {
-	$outdir = substr($ARGV[0],9);
-	die "No outputdir specified with --outdir\n" if ($outdir eq '');
-	die "$outdir: not found\n" unless (-d $outdir);
-    } else {
-	last;
-    }
-    shift;
-}
-
-sub wanted {
-    my $dir = $File::Find::dir;
-    my $f = $_;
-    my $fpath =$File::Find::name;
-    return if ($fpath =~ /\/\.svn\// ||
-	       $fpath =~ /\/\.git\//);
-    return if (/^\./ ||
-	       /~$/  ||
-	       /\.o$/ ||
-	       /^core$/ ||
-	       /\.rpm$/ ||
-	       /\.tar$/ ||
-	       /\.tar\.[^.]+$/);
-    return unless (-f $_);
-    my ($txt,$attrs) = eval { process_file($f,$re) };
-    return if ($@);
-    return unless ($txt && $attrs->{name} && $attrs->{sect});
-
-    if ($outdir eq '.') {
-	do_extract($f,$outdir,$re);
-    } else {
-	my $name = $attrs->{name};
-	my $sect = $attrs->{sect};
-	if (! -d "$outdir/man$sect") {
-	    mkdir("$outdir/man$sect") || die "mkdir($outdir/man$sect): $!\n";
-	}
-	my ($fh,$tn) = tempfile();
-	print $fh $txt;
-	close($fh);
-	system('a2x','-D',"$outdir/man$sect",'--format=manpage',$tn);
-	unlink($tn);
-	if (-f "$outdir/man$sect/$name.$sect" && $gzip) {
-	    if (-f "$outdir/man$sect/$name.$sect.gz") {
-		unlink("$outdir/man$sect/$name.$sect.gz");
-	    }
-	    system('gzip', "$outdir/man$sect/$name.$sect");
-	}
-    }
-}
-die "Nothing to process\nUse -h for help\n" if (scalar(@ARGV) == 0);
-
-if ($op eq 'extract') {
-    foreach my $f (@ARGV) {
-	my $f = do_extract($f,$outdir,$re);
-    }
-} elsif ($op eq 'view') {
-    die "Must specify files to view\n" if (scalar(@ARGV) == 0);
-    my $dir = tempdir(CLEANUP=>1);
-    foreach my $f (@ARGV) {
-	my $f = do_extract($f,$dir,$re);
-	if (-f $f) {
-	    system('man',$f);
-	}
-    }
-} elsif ($op eq 'asciidoc') {
-    die "Must specify files to convert\n" if (scalar(@ARGV) == 0);
-    foreach my $f (@ARGV) {
-	my ($txt,$attrs) = process_file($f,$re);
-	if ($txt && $attrs->{name} && $attrs->{sect}) {
-	    print $f,": ",$attrs->{name}," ",$attrs->{sect},"\n"
-		if (scalar(@ARGV) > 1);
-	    print $txt,"\n";
-	}
-    }
-} elsif ($op eq 'query') {
-    die "Must specify files to query\n" if (scalar(@ARGV) == 0);
-    foreach my $f (@ARGV) {
-	my ($txt,$attrs) = eval { process_file($f,$re) };
-	if ($@) {
-	    warn $@;
-	    next;
-	}
-	if ($txt && $attrs->{name} && $attrs->{sect}) {
-	    print $f,": ",$attrs->{name}," ",$attrs->{sect},"\n";
-	}
-    }
-} elsif ($op eq 'genman') {
-    my $cwd = getcwd();
-    if ($outdir ne '.') {
-	$outdir = abs_path($outdir);
-    }
-    find(\&wanted,@ARGV);
-} else {
-    die "Unknown op: $op\n";
-}
