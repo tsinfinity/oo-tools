@@ -7,6 +7,10 @@
 # oodoc - Extract embeded documentation from source
 #
 #--
+#<<
+# % index#sl
+# - oodoc - Extracts embedded documentation from source 
+#>>
 #
 #   Copyright (C) 2018 Alejandro Liu Ly
 #
@@ -408,7 +412,7 @@ sub exdoc_file(\%$) {
     #print STDERR "$outfile,$sect: $out->{$outfile}->{$sect}\n";
     push @{$out->{$outfile}->{$sect}},$ln; ++$cnt;
   }
-  print STDERR $cnt,"\n";
+  print STDERR $cnt,"\n" if ($verbose);
 }
 
 sub cms_out($\%) {
@@ -417,8 +421,10 @@ sub cms_out($\%) {
   if (! -d $outdir) {
     mkdir($outdir,0777) || die("mkdir($outdir): $!\n");
   }
+  #print Dump($dat);
   my %index = ();
   while (my ($f,$s) = each %$dat) {
+    next unless ($f);
     my @odat = ();
     foreach my $sn (sort keys %$s) {
       push @odat, @{$s->{$sn}};
@@ -427,11 +433,11 @@ sub cms_out($\%) {
     my $meta = get_meta_data(@odat);
     rm_meta_data(@odat,%$meta);
     $meta->{'title'} = ucfirst($f) unless ($meta->{'Title'});
-    print STDERR "Writing $f..";
+    print STDERR "Writing $f.." if ($verbose);
     open(my $fh,'>',$outdir.$f.'.md') || die("$f: $!\n");
     print $fh yaml_block(%$meta,'---'), join("\n",@odat),"\n";
     close($fh);
-    print STDERR ".OK\n";
+    print STDERR ".OK\n" if ($verbose);
   }
 }
 
@@ -570,7 +576,9 @@ if ($op eq 'man') {
   #   Options:
   #   * --outdir=path : create files in the specified directory
   #   * --recursive|-r : recursively extract from directories
-  #   * --no-recursive|+r : disable recursive extraction
+  #   * --no-recursive|-R : disable recursive extraction
+  #   * --verbose|-v : verbose
+  #   * --no-verbose|-q : quiet
   my $outdir = '';
   my %data = ();
   my $recursive = 1;
@@ -579,10 +587,14 @@ if ($op eq 'man') {
     if ($ARGV[0] =~ /^--outdir=(.*)$/) {
       $outdir = $1;
       $outdir =~ s!/*$!/!;
-    } elsif ($ARGV[0] eq '--no-recursive' || $ARGV[0] eq '+r') {
+    } elsif ($ARGV[0] eq '--no-recursive' || $ARGV[0] eq '-R') {
       $recursive = 0;
     } elsif ($ARGV[0] eq '--recursive' || $ARGV[0] eq '-r') {
       $recursive = 1;
+    } elsif ($ARGV[0] eq '--no-verbose' || $ARGV[0] eq '-q') {
+      $verbose = 0;
+    } elsif ($ARGV[0] eq '--verbose' || $ARGV[0] eq '-v') {
+      $verbose = 1;      
     } else {
       last;
     }
@@ -618,6 +630,30 @@ if ($op eq 'man') {
 
 
 #++
+#
+# # EMBEDDED DOCUMENTATION
+#
+# *oodoc* can generate documentation in 
+# [Markdown](http://daringfireball.net/projects/markdown/syntax).
+#
+# It does so by extracting files comments.  If the file extension
+# is `.md`, then it simply uses all the file contents.  All other
+# are search for patterns:
+#
+#     #\<<
+#     # documentation
+#     #\>>
+#
+# By default, it would write to a file as the same name as the source
+# with the extension replaced with `.md`.
+#
+# Whenever a documentation line `% (filename)[#section] [text]`, the
+# output file will change to `filename`.  Optionally a `#section`
+# can be specified.  This `#section` is only used for ordering the
+# output.  (#sections are ordered alphabetically).
+#
+# If a `text` is specified, it will be prepended to the beginning of
+# the file.
 #
 # # MAN PAGES
 #
@@ -712,7 +748,7 @@ if ($op eq 'man') {
 __END__
 
 #<<
-# % todo
+# % todo#A
 #
 # # TODO
 #
@@ -746,7 +782,7 @@ __END__
 #
 # - MVP
 #   - [x] viewer for man pages
-#   - [ ] extract to flat-file CMS
+#   - [x] extract to flat-file CMS
 #
 # - Modes
 #   - strip : remove all docstrings...

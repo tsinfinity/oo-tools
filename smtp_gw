@@ -35,6 +35,10 @@
 # * /etc/smtp_gw.config - Configuration environment
 #
 #--
+#<<
+# % index#sl
+# - smtp_gw - SMTP to MailGun API gateway
+#>>
 #
 #   Copyright (C) 2018 Alejandro Liu Ly
 #

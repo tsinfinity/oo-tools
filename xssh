@@ -28,6 +28,10 @@
 # * HTTP_PROXY : An HTTP tunnel
 #
 #--
+#<<
+# % index#sl
+# - xssh - SSH wrapper tunned to use bastion and proxy hosts
+#>>
 #
 #   Copyright (C) 2018 Alejandro Liu Ly
 #
