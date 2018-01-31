@@ -381,20 +381,23 @@ sub exdoc_file(\%$) {
   my ($outfile,$sect,$cnt) = ($name,'',0);
   foreach my $ln (@out) {
     if ($ln =~ /^\s*%\s*(\S*)(.*)$/) {
-      $outfile = $1 ? $1 : $name;
-      my $lopts = $2;
-      my ($x,$y) = split(/#/,$outfile);
-      if ($y) {
-	$outfile = $x;
-	$sect = $y;
+      if (substr($1,0,1) ne '<') { # Skip fragment references
+	$outfile = $1 ? $1 : $name;
+	my $lopts = $2;
+	  
+	my ($x,$y) = split(/#/,$outfile);
+	if ($y) {
+	  $outfile = $x;
+	  $sect = $y;
+	}
+	if ($lopts) {
+	  $out->{$outfile} = {} unless ($out->{$outfile});
+	  $out->{$outfile}->{$sect} = [] unless ($out->{$outfile}->{$sect});
+	  unshift @{$out->{$outfile}->{$sect}}, $lopts; ++$cnt;
+	  print "LOPTS: $lopts\n";
+	}
+	next;
       }
-      if ($lopts) {
-	$out->{$outfile} = {} unless ($out->{$outfile});
-	$out->{$outfile}->{$sect} = [] unless ($out->{$outfile}->{$sect});
-	unshift @{$out->{$outfile}->{$sect}}, $lopts; ++$cnt;
-	print "LOPTS: $lopts\n";
-      }
-      next;
     }
     if (!(exists $out->{$outfile} && exists $out->{$outfile}->{$sect})) {
       next if ($ln eq ''); # Skip empty lines at the top...
@@ -415,19 +418,44 @@ sub exdoc_file(\%$) {
   print STDERR $cnt,"\n" if ($verbose);
 }
 
+sub cms_expand(\@\@\%);
+sub cms_expand(\@\@\%) {
+  my ($odat,$idat,$frags) = @_;
+  foreach my $ln (@$idat) {
+    if ($ln =~ s/^\s*%\s*<\s*(\S+)//) {
+      my $f = $1;
+      if ($frags->{$f}) {
+	push @$odat,$ln if ($ln);
+	cms_expand(@$odat,@{$frags->{$f}},%$frags);
+      } else {
+	push @$odat,"% <$f $ln";
+      }
+    } else {
+      push @$odat,$ln;
+    }
+  }
+}
+
 sub cms_out($\%) {
   my ($outdir,$dat) = @_;
   
   if (! -d $outdir) {
     mkdir($outdir,0777) || die("mkdir($outdir): $!\n");
   }
-  #print Dump($dat);
-  my %index = ();
+  my $fragments = undef;
+  if (exists $dat->{''}) {
+    $fragments = $dat->{''};
+    delete $dat->{''};
+  }
   while (my ($f,$s) = each %$dat) {
     next unless ($f);
     my @odat = ();
     foreach my $sn (sort keys %$s) {
-      push @odat, @{$s->{$sn}};
+      if ($fragments) {
+	cms_expand(@odat,@{$s->{$sn}},%$fragments);
+      } else {
+	push @odat, @{$s->{$sn}};
+      }
     }
     #print join("\n",@odat),"\n\n=\n\n";
     my $meta = get_meta_data(@odat);
@@ -638,11 +666,11 @@ if ($op eq 'man') {
 #
 # It does so by extracting files comments.  If the file extension
 # is `.md`, then it simply uses all the file contents.  All other
-# are search for patterns:
+# file extensions are searched for patters:
 #
-#     #\<<
-#     # documentation
-#     #\>>
+# - `#<<`
+# - `#` documentation
+# - `#>>`
 #
 # By default, it would write to a file as the same name as the source
 # with the extension replaced with `.md`.
@@ -654,6 +682,19 @@ if ($op eq 'man') {
 #
 # If a `text` is specified, it will be prepended to the beginning of
 # the file.
+#
+# ## Special syntax
+#
+# You can declare _fragments_ that can be used (and re-used) elsewhere
+# in the documentation.
+#
+# To declare a fragment start with:
+#
+# `% #fragment`
+#
+# Then to include it, use:
+#
+# `% <fragment`
 #
 # # MAN PAGES
 #
@@ -745,7 +786,6 @@ if ($op eq 'man') {
 #
 #--
 
-__END__
 
 #<<
 # % todo#A
@@ -804,7 +844,8 @@ __END__
 #>>
 
 
- 
+ __END__
+
     if (scalar(%macros)) {
 	my $regex = join '|', map quotemeta, keys %macros;
 	$txt =~ s/($regex)/$macros{$1}/g;
