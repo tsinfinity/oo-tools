@@ -15,10 +15,10 @@
 #     sudo make uninstall
 #>>
 ROOT=
-SCRIPTS=oodoc xssh smtp_gw
+SCRIPTS=oodoc xssh smtp_gw cfme-ci
 BINDIR=/usr/bin
 MANDIR=/usr/share/man
-CMSDIR=/var/www/html/infinity/content/oo-tools
+CMSDIR=/var/www/html/pico/content/oo-tools
 
 help:
 	@echo "Use:"
@@ -54,9 +54,8 @@ deps:
 	yum install -y epel-release
 	yum install -y openssh-clients nmap-ncat
 	yum install -y pandoc perl perl-YAML
-	# Not sure where this should come from...
-	# yum install -y python2-requests
-	
+	yum install -y python-requests
+
 cms:
 	./oodoc exdoc --outdir=$(CMSDIR) .
 

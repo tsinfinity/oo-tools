@@ -1,0 +1,250 @@
+#!/bin/bash
+#
+#++
+# % cfme-ci(1)	Infinity utilities
+#
+# # NAME
+#
+# cfme-ci - Manage Cloud Forms artifacts in a version control system
+#
+# # SYNOPSIS
+#
+# cfme-ci _[global options]_ <verb>
+#
+# # DESCRIPTION
+#
+# This is a script used to import/export CFME artifacts to/from
+# a VCS repository.
+#
+#--
+#
+#<<
+# % index#sl
+# - cfme-ci - Manage Cloud Forms artifacts in a version control system
+#>>
+#
+#   Copyright (C) 2018 Alejandro Liu Ly
+#
+#   This is free software; you can redistribute it and/or modify
+#   it under the terms of the GNU General Public License as
+#   published by the Free Software Foundation; either version 2 of 
+#   the License, or (at your option) any later version.
+#
+#   This software is distributed in the hope that it will be useful,
+#   but WITHOUT ANY WARRANTY; without even the implied warranty of
+#   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#   GNU General Public License for more details.
+#
+#   You should have received a copy of the GNU General Public
+#   License along with this program.  If not, see 
+#   <http://www.gnu.org/licenses/>
+
+# Import/export 
+#
+set -euf -o pipefail
+
+CMDNAME="$0"
+export SRCDIR=$(dirname $(readlink -f $0))
+[ -z "${WORKDIR:-}" ] && export WORKDIR=$(pwd)
+
+die() {
+  local rc="$1" ; shift
+  echo "$@" 1>&2
+  exit $rc
+}
+
+#++
+#
+# # GLOBAL OPTIONS
+#
+while [ $# -gt 0 ]
+do
+  case "$1" in
+    # * **--dir=**_path_  
+    #   VCS working directory
+    --dir=*)
+      export WORKDIR=${1#--dir=}
+      ;;
+    # * **--bastion=**_host_  
+    #   Bastion host used to connect
+    --bastion=*)
+      export BASTION=${1#--bastion=}
+      ;;
+    # * **--cfme=**_host_  
+    #   CFME appliance host
+    --cfme=*)
+      export CFME=${1#--cfme=}
+      ;;
+    # * **--cfme-passwd=**_passwd_  
+    #   REST API authentication password
+    --cfme-passwd=*)
+      export CFME_PASSWD=${1#--cfme-passwd=}
+      ;;
+    # * **--{var}=**_{value}_  
+    #   Define variables
+    --*=*)
+      i=${1#--}
+      l=${i%%=*}
+      r=${i#*=}
+      eval "$l=\"\$r\""
+      ;;
+    
+    *)
+      break
+      ;;
+  esac
+  shift
+done
+#--
+
+
+vcsid() {
+  local v=$(git describe 2>/dev/null || :)
+  if [ -n "$v" ] ; then
+    echo $v
+    return
+  fi
+  local branch=$(git rev-parse --abbrev-ref HEAD)
+  local cid=$(git log -n1 --format=%h)
+  echo $branch-$cid
+}
+
+select_files() {
+  find "$@" \
+    -maxdepth 1 \
+    -mindepth 1 \
+    ! -name '.git*' \
+    ! -name 'landscapes' \
+    -type d
+    
+}
+
+x_declare() {
+  [ x"$1" = x"-x" ] && return
+  grep -q 'r' <<<"$1" && return
+  declare "$@"
+}
+
+gen_authentications() {
+  find $WORKDIR/authentications -mindepth 1 -maxdepth 1 -type f -name '*.sh' \
+    | (while read sh
+    do
+      yaml=$(sed -e 's/\.sh$/.yaml/' <<<"$sh")
+      current="$([ -f "$yaml" ] && cat "$yaml" || :)"
+      next="$(. "$sh")"
+      if [ x"$current" != x"$next" ] ; then
+        echo "Writting: $yaml"
+        echo "$next" > "$yaml"
+      fi
+    done)
+  find $WORKDIR/authentications -mindepth 1 -maxdepth 1 -type f -name '*.tmpl' \
+    | (while read tmpl
+    do
+      yaml=$(sed -e 's/\.tmpl$/.yaml/' <<<"$tmpl")
+      current="$([ -f "$yaml" ] && cat "$yaml" || :)"
+      next="$((
+	declare -f
+	declare -p | sed -e 's/^declare -/x_declare -/'
+	eofline="EOF${RANDOM}EOF${RANDOM}EOF"
+	echo "cat <<$eofline"
+	cat "$tmpl"
+	echo ''
+	echo "$eofline"
+      ) | sh)"
+      if [ x"$current" != x"$next" ] ; then
+        echo "Writting: $yaml"
+        echo "$next" > "$yaml"
+      fi
+    done)
+}
+    
+usage() {
+  cat 1>&2 <<-EOF
+	Usage:
+	  $CMDNAME [options] subcmd [args]
+	EOF
+  exit 1
+}
+
+sshping() {
+  expect -f - <<-'EOF'
+	spawn xssh $env(CFME) true
+	expect {
+	  "(yes/no)" { send "yes\n" ; exp_continue }
+	  eof
+	}
+	EOF
+}
+ruser() {
+  if grep -q '@' <<<"$CFME" ; then
+    cut -d@ -f1 <<<"$CFME"
+  fi
+}
+
+ynclude() {
+  [ -f "$1" ] || return
+  echo '|'
+  sed -e 's/^/    /' "$1"
+}
+
+#++
+#
+# # VERBS
+#
+op_export() {
+  # * **export**  
+  #   Export artifacts from a CFME appliance to the VCS.
+  sshping
+  echo 'rm -rf $HOME/cicd ; mkdir -p $HOME/cicd' | xssh $CFME sh
+  local ruser=$(ruser)
+  xssh $CFME sudo su - <<-EOF
+	set -x
+	miqexport all ~$ruser/cicd
+	$([ -z "$ruser" ] && echo : :) chown -R $ruser:$ruser ~$ruser/cicd
+	$([ -z "$ruser" ] && echo : :) find ~$ruser/cicd -type d -depth -exec rmdir --ignore-fail-on-non-empty \{\} \;
+	EOF
+   xssh scp -r $CFME:cicd/. $WORKDIR/.
+}
+
+op_import() {
+  # * **import**  
+  #   Import artifacts from the VCS to a CFME appliance.
+  sshping
+  gen_authentications
+  echo 'rm -rf $HOME/cicd ; mkdir -p $HOME/cicd' | xssh $CFME sh
+  xssh scp -r $(select_files $WORKDIR) $CFME:cicd
+  xssh $CFME sudo su - <<-EOF
+	set -x
+	miqimport --overwrite all ~$(ruser)/cicd
+	/var/www/miq/vmdb/bin/rails runner 'MiqServer.my_server.set_config(:server => {:custom_support_url_description => "About T-Systems ($(vcsid))"})'
+	import_authentications.rb -i ~$(ruser)/cicd/authentications -p ${CFME_PASSWD}
+	import_cfgsources.rb -i ~$(ruser)/cicd/config_sources -p ${CFME_PASSWD}
+	EOF
+}
+
+op_t() {
+  gen_authentications
+  #die 1 "Testing"
+}
+#--
+
+
+[ $# -eq 0 ] && usage
+verb="$1" ; shift
+
+if ! type op_$verb >/dev/null 2>&1 ; then
+  die 2 "Unknown verb: $verb"
+fi
+
+op_$verb "$@"
+
+#++
+#
+# # ENVIRONMENT
+#
+# * WORKDIR: VCS repo directory
+# * BASTION: xssh bastion host
+# * CFME: CloudForms appliance
+# * CFME_PASSWD: CloudForms REST API password 
+#
+#--
