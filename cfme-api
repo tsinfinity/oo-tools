@@ -1,0 +1,142 @@
+#!/bin/sh
+#++
+# % cfme-api(1)	Infinity utilities
+#
+# # NAME
+#
+# cfme-api - Basic script to call CFME REST APIs
+#
+# # SYNOPSIS
+#
+# **cfme-api** _--url=[url]_ _--user-auth=user:passwd_ **op** _[options]_
+#
+# # DESCRIPTION
+#
+# **cfme-api** is a script to call CloudForms REST APIs.
+#
+#--
+#<<
+# % index#sl
+# - cfme-api - Basic script to call CFME REST APIs
+#>>
+#
+#   Copyright (C) 2018 Alejandro Liu Ly
+#
+#   This is free software; you can redistribute it and/or modify
+#   it under the terms of the GNU General Public License as
+#   published by the Free Software Foundation; either version 2 of 
+#   the License, or (at your option) any later version.
+#
+#   This software is distributed in the hope that it will be useful,
+#   but WITHOUT ANY WARRANTY; without even the implied warranty of
+#   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#   GNU General Public License for more details.
+#
+#   You should have received a copy of the GNU General Public
+#   License along with this program.  If not, see 
+#   <http://www.gnu.org/licenses/>
+
+set -euf -o pipefail
+
+api_url="${API_URL:-https://localhost/api}"
+auth="${API_AUTH:-}"
+
+#++
+# # GLOBAL OPTIONS
+#
+while [ $# -gt 0 ]
+do
+  case "$1" in
+  # - --url=[url] : URL to the REST API end point.
+  --url=*)
+    api_url=${1#--url=}
+    ;;
+  # - --user-auth=[user]:[passwd] : authentication information
+  --user-auth=*)
+    auth="--user ${1#--user-auth=}"
+    ;;
+  *)
+    break
+    ;;
+  esac
+  shift
+done
+#
+#--
+
+die() {
+  local rc="$1" ; shift
+  echo "$@" 1>&2
+  exit $rc
+}
+
+api() {
+  local verb="$1" ; shift
+  local call="$1" ; shift
+  curl $auth -k -X "$verb" -H 'Accept: application/json' "$@" "$api_url/$call"
+}
+
+#++
+#
+# ## OPERATIONS
+#
+# - **post** _[options]_ ::
+#   Read from standard input and post to REST API end-point
+op_post() {
+  local payload="$(cat)"
+  api POST "$@" -d "$payload"
+}
+# - **get** _[options]_ ::
+#   Call REST API and show the results.
+#   Options:
+op_get() {
+  local args=''
+  while [ $# -gt 0 ]
+  do
+    case "$1" in
+      #    - --expand
+      #        Expand resources.
+      --expand)
+	args='?expand=resources'
+	;;
+      #    - --expand=_values_
+      --expand=*)
+	args="?expand=${1#--expand=}"
+	;;
+      *)
+	break
+	;;
+    esac
+    shift
+  done
+  if [ $# -eq 0 ] ; then
+    api GET ''
+  elif [ $# -eq 1 ] ; then
+    api GET "$1$args"
+  else
+    echo '{ '
+    q=''
+    for col in "$@"
+    do
+      echo $q
+      echo "\"$col\": "
+      api GET "$col$args"
+      q=","
+    done
+    echo '}'
+  fi
+}
+#--
+
+[ $# -eq 0 ] && die 11 "No verb specified"
+verb="$1" ; shift
+type op_"$verb" >/dev/null 2>&1 || die 12 "Unknown verb: $verb"
+op_"$verb" "$@"
+
+#++
+#
+# # ENVIRONEMNT
+#
+# * API_URL : URL to the REST API end-point
+# * API_AUTH : Arguments used for API authentication.
+#--

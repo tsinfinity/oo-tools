@@ -15,7 +15,7 @@
 #     sudo make uninstall
 #>>
 ROOT=
-SCRIPTS=oodoc xssh smtp_gw cfme-ci
+SCRIPTS=oodoc xssh smtp_gw cfme-ci cfme-api
 BINDIR=/usr/bin
 MANDIR=/usr/share/man
 CMSDIR=/var/www/html/pico/content/oo-tools
