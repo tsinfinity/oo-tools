@@ -1,0 +1,13 @@
+[Unit]
+Description=SMTP logger
+After=network.target
+
+[Service]
+Type=simple
+User=mail
+ExecStart=/usr/bin/smtp_logger
+Restart=on-abort
+EnvironmentFile=/etc/smtp_logger.config
+
+[Install]
+WantedBy=multi-user.target
