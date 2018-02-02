@@ -1,0 +1,362 @@
+#!/bin/sh
+#++
+# % samuel(1)	Infinity utilities
+#
+# # NAME
+#
+# samuel - Simple SAML configurator
+#
+#--
+#<<
+# % index#sl
+# - samuel - Simple SAML configurator 
+#>>
+#
+#   Copyright (C) 2018 Alejandro Liu Ly
+#
+#   This is free software; you can redistribute it and/or modify
+#   it under the terms of the GNU General Public License as
+#   published by the Free Software Foundation; either version 2 of 
+#   the License, or (at your option) any later version.
+#
+#   This software is distributed in the hope that it will be useful,
+#   but WITHOUT ANY WARRANTY; without even the implied warranty of
+#   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#   GNU General Public License for more details.
+#
+#   You should have received a copy of the GNU General Public
+#   License along with this program.  If not, see 
+#   <http://www.gnu.org/licenses/>
+#
+set -euf -o pipefail
+miq=false
+KEYCLOAK_BINDIR=/var/lib/keycloak/code/bin
+
+#++
+#
+# # SYNOPSIS
+#
+# **samuel** _[options]_ **sp-fqdn** _[steps]_
+#
+#
+# # DESCRIPTION
+#
+#
+# Writing this script because setting up SAML2 is so error prone...
+#
+# **samuel** can be used to configure SAML Service Providers based
+# on Apache's Mod Mellon.
+#
+# # OPTIONS
+#
+# * --import=config | -i config::  
+#   Import configuration settings from a file.
+# * --cfme|--miq|-c::
+#   The SP is a CFME appliance.
+# * --{key}={value}
+#   Defines a {key} with {value}.  See configuration for possible
+#   settings.
+# * **sp-fqdn**
+#   FQDN name of Service Provider.  Use `user`@`hostname` format
+# * **steps**
+#   Sequence of numbers of steps to take.  Default to `1 2 3`.
+#
+#--
+while [ $# -gt 0 ] ; do
+  case "$1" in
+  --import=*)
+    . ${1#--import=}
+    shift
+    ;;
+  -i)
+    . "$2"
+    shift 2
+    ;;
+  --cfme|--miq|-c)
+    miq=:
+    shift
+    ;;
+  --*=*)
+    k=$(cut -d= -f1 <<<"${1#--*}" | tr a-z A-Z)
+    v=$(cut -d= -f1 <<<"${1#--*}")
+    eval '$'"$k"'="$v"'
+    ;;
+  *)
+    break
+    ;;
+  esac
+done
+
+die() {
+  local r="$1" ; shift
+  echo "$@" 2>&1
+  exit $r
+}
+
+#++
+# # CONFIG FILE
+#
+# Configuration files are imported using '--import' option.  The
+# following variables can be configured:
+#
+# * **IDP** : FQDN of identity provider.  Specify `user@` if the default user
+#   is not right.
+# * **REALM** : `KeyCloak` realm to use.
+# * **KC_USER** : `KeyCloak` realm user allowed to do **realm-management**.
+# * **KC_PW** : Password for user.
+# * **CLIENT_TEMPLATE** : (optional) If specified, will use the given
+#   template.
+#
+# ## KeyCloak User
+#
+# The user is specified with `KC_USER` and `KC_PW`.  For this, create
+# a user in the given realm and assign Role Mappings.  Go to that user's
+# `Role Mappings` tab, go to the `client roles` drop down, select
+# **realm-management** and add the **manage-clients** role.
+# 
+# ## Scoping Client template
+#
+# If `CLIENT_TEMPLATE` is being used, the template needs to be scoped
+# for assignment.  To do that, Go to **Realm Settings**,
+# **Client Registration** tab, **Client Registration Policies** sub-tab,
+# under **Authenticated Access Policies** heading,
+# **Edit** **Alowed Client Templates**.  Added the template to the
+# **Alowed Client Templates**.
+#--
+
+check_vars() {
+  local i j
+  for i in IDP REALM KC_USER KC_PW
+  do
+    eval j='"${'"$i"':-}"'
+    [ -z "$j" ] && echo $i
+  done
+  return 0
+}
+## @fn write_file()
+## @brief Write file contents
+## @param file File to write to
+##
+## It reads from standard input the new contents of a file.
+## Before writing to the file, it makes sure that we are
+## changing it or not.  This allows then to check the
+## timestamp to see if the file has changed (and do an
+## additional step)
+##
+write_file() {
+  local file="$1"
+  local otxt="$([ -f "$1" ] && sed 's/^/:/' "$1")"
+  local itxt="$(sed 's/^/:/')"
+  [ x"$otxt" = x"$itxt" ] && return
+  echo "Updating $file" 1>&2
+  echo "$itxt" | sed 's/^://' > "$file"
+}
+
+# phase-1 : prepare cfme appliance
+phase1() {
+  if $miq ; then
+    prefix=miqsp-
+    point=saml2
+    http_config='
+	rm -f \
+	  /etc/httpd/conf.d/manageiq-remote-user.conf \
+	  /etc/httpd/conf.d/manageiq-external-auth-saml.conf
+	TEMPLATE_DIR="/opt/rh/cfme-appliance/TEMPLATE"
+	cp ${TEMPLATE_DIR}/etc/httpd/conf.d/manageiq-remote-user.conf /etc/httpd/conf.d
+	cp ${TEMPLATE_DIR}/etc/httpd/conf.d/manageiq-external-auth-saml.conf /etc/httpd/conf.d
+	'
+  else
+    prefix=mellon-
+    point=mellon
+    http_config='
+	write_file /etc/httpd/conf.d/mellon-params.conf <<-EOF
+	  <Location / >
+	    MellonEnable info
+	    MellonEndpointPath /mellon/
+	    MellonSPMetadataFile /etc/httpd/saml2/mellon-metadata.xml
+	    MellonSPPrivateKeyFile /etc/httpd/saml2/mellon-key.key
+	    MellonSPCertFile /etc/httpd/saml2/mellon-cert.cert
+	    MellonIdPMetadataFile /etc/httpd/saml2/idp-metadata.xml
+	  </Location>
+	  # These are better in a separate file as they may be
+	  # overwritten
+	  # The file containing the paths must come AFTER this
+	  # file alphabetically.
+	  #<Location /protected>
+	  # AuthType Mellon
+	  # MellonEnable auth
+	  # Require valid-user
+	  #</Location>
+	EOF
+	:
+	'
+  fi
+  
+  xssh $SP sudo bash<<-EOF
+	set -euf -o pipefail
+	# Not sure if we need this...
+	$(declare -f write_file)
+	mkdir -p /etc/httpd/saml2
+	$http_config
+	(
+	  cd /etc/httpd/saml2
+	  /usr/libexec/mod_auth_mellon/mellon_create_metadata.sh https://$SP_HOST https://$SP_HOST/$point
+	  for a in key cert xml
+	  do
+	    b=\$a
+	    [ \$b = 'xml' ] && b=metadata
+	    ln -sf \$(find . -name 'https_*.'\$a) $prefix\$b.\$a
+	  done
+	)
+	EOF
+  xssh scp $SP:/etc/httpd/saml2/${prefix}metadata.xml sp-metadata.xml
+}
+
+# phase-2 : Create a client in KeyCloak
+phase2() {
+  [ ! -f sp-metadata.xml ] && die 3 "No SP metadata, run phase 1 first"
+  if $miq ; then
+    prefix=miqsp-
+  else
+    prefix=mellon-
+  fi
+
+  echo "Connecting $IDP_HOST"
+  scp sp-metadata.xml $IDP:${prefix}metadata.xml
+  if [ -n "${CLIENT_TEMPLATE:-}" ] ; then
+    client_opts="kcreg.sh update https://$SP_HOST"
+    client_opts="$client_opts -s clientTemplate=$CLIENT_TEMPLATE -s useTemplateScope=true -s useTemplateMappers=true"
+  else
+    client_opts=''
+  fi
+  
+  
+  ssh $IDP <<-EOF
+	set -euf -o pipefail
+	export PATH=\$PATH:$KEYCLOAK_BINDIR
+	kcreg.sh config credentials \
+		--server http://localhost:8080/auth \
+		--realm $REALM \
+		--user $KC_USER \
+		--password $KC_PW
+	kcreg.sh delete https://$SP_HOST || :
+	kcreg.sh create \
+		-e saml2 \
+		-f ${prefix}metadata.xml
+	$client_opts
+	EOF
+  if $miq ; then
+    attributes=$(ssh $IDP $KEYCLOAK_BINDIR/kcreg.sh get https://$SP_HOST | jq .attributes)
+    attributes=$(jq \
+	'.saml_name_id_format = "username" | .saml_assertion_consumer_url_redirect = "'"https://$SP_HOST/saml2/postResponse"'"' \
+	<<<"$attributes")
+    attributes=$(jq \
+	'."saml.multivalued.roles" = "false"| ."saml.onetimeuse.condition" = "false" ' \
+	<<<"$attributes")
+    ssh $IDP <<-EOF
+	set -euf -o pipefail
+	export PATH=\$PATH:$KEYCLOAK_BINDIR
+	kcreg.sh update https://$SP_HOST -d protocolMappers
+	kcreg.sh update https://$SP_HOST \
+		-s adminUrl= \
+		-s baseUrl=https://$SP_HOST/ \
+		-s protocolMappers='[]'
+	kcreg.sh update https://$SP_HOST -s attributes='$attributes'
+	#kcreg.sh get https://$SP_HOST > cfme1
+	EOF
+  fi
+}
+
+#phase 3 - finish configuring the appliance
+phase3s1() {
+  xssh $SP sudo bash <<-EOF
+	set -euf -o pipefail
+	(
+	  cd /etc/httpd/saml2
+	  curl -s -o idp-metadata.xml https://$IDP_HOST/auth/realms/$REALM/protocol/saml/descriptor
+	)
+	apachectl -t
+	systemctl restart httpd.service
+	EOF
+}
+phase3s2() {
+  (
+    echo "set -euf -o pipefail"
+    for setting in \
+      ':mode => "httpd"' \
+      ':saml_enabled => true' \
+      ':sso_enabled => true' \
+      ':httpd_role => true' \
+      ':local_login_disabled => false'
+    do
+      echo "/var/www/miq/vmdb/bin/rails runner 'MiqServer.my_server.set_config(:authentication => {$setting})'"
+    done
+    echo "systemctl restart evmserverd"
+  ) | xssh $SP sudo bash -il
+}
+phase3() {
+  phase3s1
+  $miq && phase3s2 || :
+}
+
+
+[ $# -eq 0 ] && die 1 "Usage: $0 [options] domain [steps]"
+
+
+SP="$1" ; shift
+v=$(check_vars)
+[ -n "$v" ] && die 2 "Undefined vars: $v"
+if grep -q '@' <<<"$IDP" ; then
+  IDP_HOST=$(cut -d '@' -f2 <<<"$IDP")
+fi
+if grep -q '@' <<<"$SP" ; then
+  SP_HOST=$(cut -d '@' -f2 <<<"$SP")
+fi
+
+if [ $# -eq 0 ] ; then
+  set - 1 2 3
+fi
+
+for p in "$@"
+do
+  if type phase${p} >/dev/null 2>&1 ; then
+    phase${p}
+  else
+    die 5 "Unknow phase: $p"
+  fi
+done
+
+  
+
+
+#~ SVR-OO-d0-cfme1     RG-OO-D0                 westeurope
+#~ SVR-OO-ts1-cfmet1   RG-OO-TS1                westeurope
+#~ SVR-OO-ts1-cfmet2   RG-OO-TS1                westeurope
+
+#~ CFME=ts1-cfmet2
+#~ DOMAIN=sprint.tsinfinity.net
+#~ export BASTION=sysadm1@ts1-mgm1.$DOMAIN
+
+#~ CFME=d0-cfme1
+#~ DOMAIN=dev.tsinfinity.net
+#~ export BASTION=sysadm1@d0-mgm1.$DOMAIN
+
+#~ export BASTION=sysadm1@d3-mgm1.dev.tsinfinity.net
+#~ CFME=d3-cfme1
+#~ DOMAIN=dev.tsinfinity.net
+
+
+#: kcreg.sh update https://$fqdn -d protocolMappers
+
+#kcadm.sh get clients -r $REALM --fields id,clientId
+#~ : kcadm.sh get clients/220480d8-6ff0-4008-a920-977fb5fa9ecc -r $REALM
+#~ : kcreg.sh get https://d3-cfme2.dev.tsinfinity.net
+#~ : kcadm.sh create clients -r $REALM \
+	#~ -s clientId=https://$fqdn \
+	#~ -s enabled=true \
+#~ : kcadm.sh config credentials \
+	#~ --server http://localhost:8080/auth \
+	#~ --realm $REALM \
+	#~ --user $KC_USER \
+	#~ --password $KC_PW
+#kcadm.sh get realms

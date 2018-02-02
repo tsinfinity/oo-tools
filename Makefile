@@ -15,7 +15,7 @@
 #     sudo make uninstall
 #>>
 ROOT=
-SCRIPTS=oodoc xssh smtp_gw cfme-ci cfme-api
+SCRIPTS=oodoc xssh smtp_gw smtp_logger cfme-ci cfme-api samuel
 BINDIR=/usr/bin
 MANDIR=/usr/share/man
 CMSDIR=/var/www/html/pico/content/oo-tools
@@ -39,6 +39,8 @@ install:
 	done
 	install --compare -D --mode=0644 smtp_gw.service $(ROOT)/etc/systemd/system/smtp_gw.service
 	[ ! -f $(ROOT)/etc/smtp_gw.config ] && install --mode=0644 smtp_gw.config $(ROOT)/etc/smtp_gw.config || :
+	install --compare -D --mode=0644 smtp_logger.service $(ROOT)/etc/systemd/system/smtp_logger.service
+	[ ! -f $(ROOT)/etc/smtp_logger.config ] && install --mode=0644 smtp_logger.config $(ROOT)/etc/smtp_logger.config || :
 
 uninstall:
 	for n in $(SCRIPTS) ;\
