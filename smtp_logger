@@ -83,12 +83,12 @@ class EmlServer(SMTPServer):
     if not allowed :
       print 'Peer :%s is not allowed' % peer_ip
       return
-    filename = '%s/%s-%d.eml' % LOG_DIR, (datetime.now().strftime('%Y%m%d%H%M%S'),
-	    self.no)
+
+    filename = '%s/%s-%d.eml' % (LOG_DIR, datetime.now().strftime('%Y%m%d%H%M%S'), self.no)
     f = open(filename, 'w')
     f.write(data)
     f.close
-    print '%s saved.' % filename
+    print '%s saved. (From %s)' % (filename, peer_ip)
     self.no += 1
 
 def run():
