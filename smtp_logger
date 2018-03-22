@@ -62,7 +62,7 @@ import os
 #from datetime import datetime
 
 allow_list = os.environ['SMTP_ALLOWED'].split(",")
-LOG_DIR = os.environm['LOG_DIR']
+LOG_DIR = os.environ['LOG_DIR']
       
 
 from datetime import datetime
