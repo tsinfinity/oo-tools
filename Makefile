@@ -18,7 +18,7 @@ ROOT=
 SCRIPTS=oodoc xssh smtp_gw smtp_logger cfme-ci cfme-api samuel
 BINDIR=/usr/bin
 MANDIR=/usr/share/man
-CMSDIR=/var/www/html/pico/content/oo-tools
+CMSDIR=sysadm1@hm1:/var/www/pico/content/oo-tools
 
 help:
 	@echo "Use:"
@@ -59,5 +59,10 @@ deps:
 	yum install -y python-requests
 
 cms:
-	./oodoc exdoc --outdir=$(CMSDIR) .
+	tmpdat=$$(mktemp -d) ; \
+	chmod 775 $$tmpdat ; \
+	./oodoc exdoc --outdir=$$tmpdat . ; \
+	rsync -avz --delete $$tmpdat/ $(CMSDIR) ; \
+	rm -rf $$tmpdat
+
 
