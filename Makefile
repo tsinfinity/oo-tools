@@ -25,6 +25,7 @@ help:
 	@echo "	sudo make install - to install"
 	@echo "	sudo make uninstall - to un-install"
 	@echo "	sudo make deps - to install dependancies"
+	@echo "	make cms - update CMS data"
 
 install:
 	for n in $(SCRIPTS) ;\
