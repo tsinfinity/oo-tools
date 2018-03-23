@@ -126,6 +126,19 @@ op_get() {
     echo '}'
   fi
 }
+# - **del**
+#   Call REST API delete and show the results.
+#   Options:
+op_del() {
+  local args=''
+  if [ $# -eq 0 ] ; then
+    die 135 "Must specify resource to delete"
+  elif [ $# -eq 1 ] ; then
+    api DELETE "$1$args"
+  else
+    die 139 "Too much stuff"
+  fi
+}
 #--
 
 [ $# -eq 0 ] && die 11 "No verb specified"
