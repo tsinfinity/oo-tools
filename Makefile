@@ -57,6 +57,7 @@ deps:
 	yum install -y openssh-clients nmap-ncat
 	yum install -y pandoc perl perl-YAML
 	yum install -y python-requests
+	yum install -y expect
 
 cms:
 	tmpdat=$$(mktemp -d) ; \
