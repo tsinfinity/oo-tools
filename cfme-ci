@@ -60,6 +60,11 @@ die() {
 while [ $# -gt 0 ]
 do
   case "$1" in
+    # * **--include=**file
+    #   Include a shell scrip
+    --include=*)
+      . "${1#--include=}"
+      ;;
     # * **--dir=**_path_  
     #   VCS working directory
     --dir=*)
@@ -74,11 +79,6 @@ do
     #   CFME appliance host
     --cfme=*)
       export CFME=${1#--cfme=}
-      ;;
-    # * **--cfme-passwd=**_passwd_  
-    #   REST API authentication password
-    --cfme-passwd=*)
-      export CFME_PASSWD=${1#--cfme-passwd=}
       ;;
     # * **--{var}=**_{value}_  
     #   Define variables
@@ -124,39 +124,6 @@ x_declare() {
   grep -q 'r' <<<"$1" && return
   declare "$@"
 }
-
-gen_authentications() {
-  find $WORKDIR/authentications -mindepth 1 -maxdepth 1 -type f -name '*.sh' \
-    | (while read sh
-    do
-      yaml=$(sed -e 's/\.sh$/.yaml/' <<<"$sh")
-      current="$([ -f "$yaml" ] && cat "$yaml" || :)"
-      next="$(. "$sh")"
-      if [ x"$current" != x"$next" ] ; then
-        echo "Writting: $yaml"
-        echo "$next" > "$yaml"
-      fi
-    done)
-  find $WORKDIR/authentications -mindepth 1 -maxdepth 1 -type f -name '*.tmpl' \
-    | (while read tmpl
-    do
-      yaml=$(sed -e 's/\.tmpl$/.yaml/' <<<"$tmpl")
-      current="$([ -f "$yaml" ] && cat "$yaml" || :)"
-      next="$((
-	declare -f
-	declare -p | sed -e 's/^declare -/x_declare -/'
-	eofline="EOF${RANDOM}EOF${RANDOM}EOF"
-	echo "cat <<$eofline"
-	cat "$tmpl"
-	echo ''
-	echo "$eofline"
-      ) | sh)"
-      if [ x"$current" != x"$next" ] ; then
-        echo "Writting: $yaml"
-        echo "$next" > "$yaml"
-      fi
-    done)
-}
     
 usage() {
   cat 1>&2 <<-EOF
@@ -181,11 +148,6 @@ ruser() {
   fi
 }
 
-ynclude() {
-  [ -f "$1" ] || return
-  echo '|'
-  sed -e 's/^/    /' "$1"
-}
 
 #++
 #
@@ -199,9 +161,9 @@ op_export() {
   local ruser=$(ruser)
   xssh $CFME sudo su - <<-EOF
 	set -x
-	miqexport all ~$ruser/cicd
-	$([ -z "$ruser" ] && echo : :) chown -R $ruser:$ruser ~$ruser/cicd
-	$([ -z "$ruser" ] && echo : :) find ~$ruser/cicd -type d -depth -exec rmdir --ignore-fail-on-non-empty \{\} \;
+	miqexport all /home/$ruser/cicd
+	$([ -z "$ruser" ] && echo : :) chown -R $ruser:$ruser /home/$ruser/cicd
+	$([ -z "$ruser" ] && echo : :) find /home/$ruser/cicd -type d -depth -exec rmdir --ignore-fail-on-non-empty \{\} \;
 	EOF
    xssh scp -r $CFME:cicd/. $WORKDIR/.
 }
@@ -215,10 +177,10 @@ op_import() {
   xssh scp -r $(select_files $WORKDIR) $CFME:cicd
   xssh $CFME sudo su - <<-EOF
 	set -x
-	miqimport --overwrite all ~$(ruser)/cicd
+	vmdb
+	rake "rhconsulting:miq_auths:import[/home/$(ruser)/cicd/authentications]"
+	miqimport --overwrite all /home/$(ruser)/cicd
 	/var/www/miq/vmdb/bin/rails runner 'MiqServer.my_server.set_config(:server => {:custom_support_url_description => "About T-Systems ($(vcsid))"})'
-	import_authentications.rb -i ~$(ruser)/cicd/authentications -p ${CFME_PASSWD}
-	import_cfgsources.rb -i ~$(ruser)/cicd/config_sources -p ${CFME_PASSWD}
 	EOF
 }
 
@@ -226,6 +188,78 @@ op_t() {
   gen_authentications
   #die 1 "Testing"
 }
+#--
+
+
+gen_authentications() {
+  find $WORKDIR/authentications -mindepth 1 -maxdepth 1 -type f -name '*.sh' \
+    | (while read sh
+    do
+      yaml=$(sed -e 's/\.sh$/.yaml/' <<<"$sh")
+      current="$([ -f "$yaml" ] && cat "$yaml" || :)"
+      next="$(. "$sh")"
+      if [ x"$current" != x"$next" ] ; then
+        echo "Writting: $yaml"
+        echo "$next" > "$yaml"
+      fi
+    done)
+  find $WORKDIR/authentications -mindepth 1 -maxdepth 1 -type f -name '*.tmpl' \
+    | (while read tmpl
+    do
+      yaml=$(sed -e 's/\.tmpl$/.yaml/' <<<"$tmpl")
+      current="$([ -f "$yaml" ] && cat "$yaml" || :)"
+      next="$((
+	declare -f
+	declare -p | sed -e 's/^declare -/x_declare -/'
+	# Add pre-processor lines...
+	grep -E '^##!' "$tmpl" | sed 's/^##!//'
+	eofline="EOF${RANDOM}EOF${RANDOM}EOF"
+	echo "cat <<$eofline"
+	grep -v '^##!' "$tmpl"
+	echo ''
+	echo "$eofline"
+      ) | sh)"
+      if [ x"$current" != x"$next" ] ; then
+        echo "Writting: $yaml"
+        echo "$next" > "$yaml"
+      fi
+    done)
+}
+
+ynclude() {
+  [ -f "$1" ] || return
+  echo '|'
+  sed -e 's/^/    /' "$1"
+}
+#++
+#
+# # AUTHENTICATIONS
+#
+# The `authentications` sub-directory contain authentication
+# definitions (outside) the import/export scripts.  This is because
+# authentications can not be exported from the `CFME` database.
+#
+# In the directory, the `*.yaml` are ignored from SCM perspective
+# as it would contain sensitive data.  These are supposed to be
+# created either from templates or programatically.  As such
+# two types of files are available:
+#
+# * `*.sh`
+#   These are shell scripts that are sourced and its output
+#   used to create the respective `*.yaml` file.
+# * `*.tmpl`
+#   These are `yaml` files but can use shell script constructs
+#   as a simple form of macro language.  Lines that start with
+#   **##!** are evaluated first as shell script commands.  This
+#   can be used to define values or source scripts.  But any valid
+#   shell script command can be used.  
+#   Then the rest of the script is evaluated as a HERE document.
+#   As such, `$var` are expanded, and `$(cmd)` can be used to call
+#   shell commands.  A useful command to use here is:  
+#   `$(ynclude "sshkey.file")`  
+#   Which can be used to include private key files into YAML
+#   documents.
+#
 #--
 
 
@@ -245,6 +279,5 @@ op_$verb "$@"
 # * WORKDIR: VCS repo directory
 # * BASTION: xssh bastion host
 # * CFME: CloudForms appliance
-# * CFME_PASSWD: CloudForms REST API password 
 #
 #--
